@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.local
+.env.production
+*.db
+*.sqlite
+*.sqlite3
+instance/
+
+# Node
+node_modules/
+dist/
+build/
+.next/
+out/
+coverage/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Secrets
+secrets/
+*.pem
+*.key
+
+# Alembic
+alembic.ini.bak
+
+# Test
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Build
+*.egg-info/
+frontend/data
