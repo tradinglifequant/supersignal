@@ -1,5 +1,7 @@
 # Research & Technical Verification (Phase 0)
 
+> **Verification warning:** This document was carried forward from the initial prototype and its endpoint, limit, and compatibility claims have not been independently verified in this session. In particular, Portfolio Margin fallback and conditional-order behavior must not be relied upon. The ThreeRouter contract is unconfirmed. Treat the material below as research leads, not approved integration contracts; re-check current official documentation and account-specific behavior before use. Real Binance entries are locked on both testnet and live.
+
 ## Binance USD-M Futures API — Verified 2026-01-08
 
 **Official Docs:**

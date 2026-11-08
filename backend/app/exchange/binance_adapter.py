@@ -26,6 +26,11 @@ RETRYABLE_CODES = {-1000, -1001, -1003, -1016, -1021}  # timeout, rate limit, et
 def _decimal(v: Any) -> Decimal:
     return Decimal(str(v))
 
+
+class EntryLockedError(RuntimeError):
+    """New Binance exposure is disabled pending safety and integration verification."""
+
+
 class BinanceAdapter(ExchangeAdapter):
     """
     Binance USD-M Futures adapter.
@@ -246,6 +251,11 @@ class BinanceAdapter(ExchangeAdapter):
         position_side: Optional[str] = None,
         working_type: Optional[str] = None,
     ) -> OrderResultDTO:
+        # No configuration flag can unlock entries before the unfinished safety gates
+        # are implemented and reviewed. Preserve reduce-only/close-position requests
+        # for existing exposure; their exchange support remains unverified.
+        if not reduce_only and not close_position:
+            raise EntryLockedError("Binance entries are locked pending safety verification")
         params: dict[str, Any] = {
             "symbol": symbol,
             "side": side.upper(),

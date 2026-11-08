@@ -95,14 +95,9 @@ This document is the persistent project brief for future AI coding sessions. Rea
 
 ## 6. Current project stage
 
-Documentation baseline has been prepared. No application code, exchange connection, ThreeRouter integration, credentials, database, or live trading behavior is implied to exist yet.
+The initial prototype was merged in GitHub PR #1. It contains backend and dashboard code, but phase exit gates have **not** been established by that merge. It is not ready for testnet order execution, live trading, or public deployment. Binance entries are locked in the real adapter and the real-adapter engine cannot start; mock tests are not evidence of exchange readiness. The adapter permits reduce-only/close-position requests for existing exposure, but their correctness is not verified.
 
-Next recommended implementation task:
-1. Create the repository skeleton.
-2. Set up Windows development environment.
-3. Implement config, logging, database models, and migrations.
-4. Implement read-only Binance metadata/account connectivity.
-5. Add market data and trigger tests before any order execution.
+Next work should proceed in small, tested slices against the phase exit gates, beginning with safety and contract discovery. In particular, replace placeholder risk values, repair ambiguous-order reconciliation and protection/emergency behavior, verify Portfolio Margin and provider contracts, and review authentication and deployment security before considering any entry-lock removal. See the README for known blockers.
 
 ## 7. AI coding agent operating instructions
 
