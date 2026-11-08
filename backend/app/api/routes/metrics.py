@@ -8,13 +8,13 @@ from datetime import datetime, timezone
 from app.db.session import get_db
 from app.db.models import Trade, EquitySnapshot
 from app.schemas import MetricsResponse
-from app.security.auth import get_current_user_optional
+from app.security.auth import get_current_user
 from app.core.config import get_settings
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
 @router.get("", response_model=MetricsResponse)
-async def get_metrics(db: Session = Depends(get_db), user=Depends(get_current_user_optional)):
+async def get_metrics(db: Session = Depends(get_db), user=Depends(get_current_user)):
     # Compute KPIs from persisted trades
     trades = db.query(Trade).all()
     closed = [t for t in trades if t.status in ("CLOSED", "EMERGENCY_CLOSED") and t.realized_pnl is not None]
@@ -67,12 +67,12 @@ async def get_metrics(db: Session = Depends(get_db), user=Depends(get_current_us
     )
 
 @router.get("/equity-curve")
-async def equity_curve(db: Session = Depends(get_db), limit: int = 100, user=Depends(get_current_user_optional)):
+async def equity_curve(db: Session = Depends(get_db), limit: int = 100, user=Depends(get_current_user)):
     snapshots = db.query(EquitySnapshot).order_by(EquitySnapshot.captured_at.asc()).limit(limit).all()
     return [{"captured_at": s.captured_at.isoformat(), "wallet_balance": str(s.wallet_balance), "account_equity": str(s.account_equity), "unrealized_pnl": str(s.unrealized_pnl)} for s in snapshots]
 
 @router.get("/performance")
-async def performance_by_symbol(db: Session = Depends(get_db), user=Depends(get_current_user_optional)):
+async def performance_by_symbol(db: Session = Depends(get_db), user=Depends(get_current_user)):
     from collections import defaultdict
     trades = db.query(Trade).filter(Trade.status.in_(["CLOSED", "EMERGENCY_CLOSED"])).all()
     by_symbol = defaultdict(list)

@@ -3,98 +3,90 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone
-from typing import Dict, Set
+from typing import Set
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query
-from jose import JWTError
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
-from app.db.session import get_db
-from app.security.auth import decode_token
 from app.core.config import get_settings
-from app.engine.service import EngineService
-from app.api.routes.engine import get_engine
+from app.security.auth import decode_token
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+
 class ConnectionManager:
-    def __init__(self):
+    def __init__(self) -> None:
         self.active: Set[WebSocket] = set()
 
-    async def connect(self, ws: WebSocket):
-        await ws.accept()
+    def connect(self, ws: WebSocket) -> None:
         self.active.add(ws)
-        logger.info(f"WS client connected, total={len(self.active)}")
 
-    def disconnect(self, ws: WebSocket):
+    def disconnect(self, ws: WebSocket) -> None:
         self.active.discard(ws)
-        logger.info(f"WS client disconnected, total={len(self.active)}")
 
-    async def broadcast(self, message: dict):
+    async def broadcast(self, message: dict) -> None:
         data = json.dumps(message, default=str)
-        dead = []
-        for ws in self.active:
+        for ws in list(self.active):
             try:
                 await ws.send_text(data)
-            except Exception as e:
-                logger.warning(f"WS broadcast error: {e}")
-                dead.append(ws)
-        for ws in dead:
-            self.disconnect(ws)
+            except Exception:
+                logger.warning("WebSocket broadcast failed")
+                self.disconnect(ws)
+
 
 manager = ConnectionManager()
 
+
 @router.websocket("/ws")
-async def websocket_endpoint(
-    websocket: WebSocket,
-    token: str | None = Query(None),
-    db: Session = Depends(get_db),
-):
-    settings = get_settings()
-    # Auth check
-    allow_bypass = (settings.app_env == "development" and __import__("os").getenv("ALLOW_DEV_BYPASS", "false").lower() == "true")
-    authenticated = False
-    if token:
-        try:
-            payload = decode_token(token)
-            if payload.get("sub"):
-                authenticated = True
-        except Exception:
-            pass
-    if not authenticated and not allow_bypass:
-        # Still allow for demo but warn; in production require auth
-        # For tests, allow
-        if settings.app_env == "development":
-            authenticated = True
-        else:
+async def websocket_endpoint(websocket: WebSocket) -> None:
+    # Browser clients must have an explicitly allowed Origin. No wildcard.
+    if websocket.headers.get("origin") not in get_settings().cors_origin_list:
+        await websocket.close(code=4003)
+        return
+    await websocket.accept()
+    try:
+        # Authenticate in the first frame, not in a URL that may be logged.
+        message = await asyncio.wait_for(websocket.receive_json(), timeout=5)
+        if not isinstance(message, dict) or message.get("type") != "authenticate" or not isinstance(message.get("token"), str):
             await websocket.close(code=4001)
             return
-
-    await manager.connect(websocket)
-    # Send initial snapshot
-    await websocket.send_text(json.dumps({"type": "snapshot", "payload": {"message": "connected", "timestamp": datetime.now(timezone.utc).isoformat()}}, default=str))
-
-    try:
-        while True:
-            # Keepalive + handle client messages
-            data = await websocket.receive_text()
-            try:
-                msg = json.loads(data)
-                if msg.get("type") == "ping":
-                    await websocket.send_text(json.dumps({"type": "pong", "timestamp": datetime.now(timezone.utc).isoformat()}))
-                elif msg.get("type") == "subscribe":
-                    await websocket.send_text(json.dumps({"type": "subscribed", "payload": msg.get("payload")}))
-            except Exception:
-                # Echo unknown
-                await websocket.send_text(json.dumps({"type": "echo", "payload": data}))
+        payload = decode_token(message["token"])
+        expires_at = int(payload["exp"])
+        if expires_at <= time.time():
+            await websocket.close(code=4001)
+            return
+    except (HTTPException, ValueError, TypeError, KeyError, asyncio.TimeoutError, json.JSONDecodeError):
+        await websocket.close(code=4001)
+        return
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
-    except Exception as e:
-        logger.error(f"WS error: {e}")
+        return
+
+    manager.connect(websocket)
+    try:
+        await websocket.send_json({"type": "snapshot", "payload": {"message": "connected", "timestamp": datetime.now(timezone.utc).isoformat()}})
+        while True:
+            remaining = expires_at - time.time()
+            if remaining <= 0:
+                await websocket.close(code=4001)
+                break
+            try:
+                msg = await asyncio.wait_for(websocket.receive_json(), timeout=remaining)
+            except asyncio.TimeoutError:
+                await websocket.close(code=4001)
+                break
+            if isinstance(msg, dict) and msg.get("type") == "ping":
+                await websocket.send_json({"type": "pong", "timestamp": datetime.now(timezone.utc).isoformat()})
+            elif isinstance(msg, dict) and msg.get("type") == "subscribe":
+                await websocket.send_json({"type": "subscribed", "payload": msg.get("payload")})
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.warning("WebSocket session failed")
+    finally:
         manager.disconnect(websocket)
 
-# Helper to broadcast from engine
-async def broadcast_event(event_type: str, payload: dict):
+
+async def broadcast_event(event_type: str, payload: dict) -> None:
     await manager.broadcast({"type": event_type, "payload": payload, "timestamp": datetime.now(timezone.utc).isoformat()})

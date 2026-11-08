@@ -1,65 +1,73 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.session import get_db
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 bearer_scheme = HTTPBearer(auto_error=False)
+_BCRYPT_HASH = re.compile(r"^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$")
+_LEGACY_SECRETS = {"change-me-jwt-secret-key-32-chars-min", "change-me-jwt-secret"}
 
-# Simple user table is not persisted in DB for single-operator MVP; use env-based admin.
-# For production, add User model. Here we implement file-based or settings-based auth.
 
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
+
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    try:
+        return pwd_context.verify(plain, hashed)
+    except (ValueError, TypeError):
+        return False
+
+
+def require_auth_config() -> None:
+    settings = get_settings()
+    if (not settings.admin_username.strip()
+            or not _BCRYPT_HASH.fullmatch(settings.admin_password_hash)
+            or not 12 <= int(settings.admin_password_hash[4:6]) <= 16
+            or len(settings.jwt_secret_key) < 32
+            or settings.jwt_secret_key in _LEGACY_SECRETS
+            or settings.jwt_algorithm != "HS256"
+            or settings.jwt_expire_minutes <= 0):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="Authentication is not configured")
+
+
+def get_admin_credentials() -> tuple[str, str]:
+    require_auth_config()
+    settings = get_settings()
+    return settings.admin_username, settings.admin_password_hash
+
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
+    require_auth_config()
     settings = get_settings()
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=settings.jwt_expire_minutes))
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
+
 def decode_token(token: str) -> dict:
+    require_auth_config()
     settings = get_settings()
     try:
-        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm],
+                             options={"require_exp": True, "require_sub": True})
+        if payload.get("sub") != settings.admin_username:
+            raise JWTError("Invalid subject")
         return payload
-    except JWTError as e:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from e
+    except (JWTError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from exc
 
-# For MVP, we have a single operator user configured via env or default.
-# We store hashed password in memory; initial password is "admin123" hashed; operator must change.
-DEFAULT_ADMIN_USERNAME = "admin"
-# Pre-hashed admin123 for dev; in production, set ADMIN_PASSWORD_HASH env
-import os as _os
-
-def get_admin_credentials() -> tuple[str, str]:
-    username = _os.getenv("ADMIN_USERNAME", DEFAULT_ADMIN_USERNAME)
-    pwd_hash = _os.getenv("ADMIN_PASSWORD_HASH", "")
-    if not pwd_hash:
-        # hash of "admin123" generated at runtime for portability
-        # Using fixed known hash to avoid bcrypt version mismatch; will verify via passlib else fallback
-        try:
-            test_hash = "$2b$12$qQu.2tig0FHopadEPbzq9ewB4RRCA./HYymFqO2n6NejAjY.DBy1O"
-            # verify it matches admin123; if passlib fails, generate
-            if not verify_password("admin123", test_hash):
-                raise ValueError("hash mismatch")
-            pwd_hash = test_hash
-        except Exception:
-            pwd_hash = hash_password("admin123")
-    return username, pwd_hash
 
 async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
@@ -67,19 +75,4 @@ async def get_current_user(
     if credentials is None or not credentials.credentials:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     payload = decode_token(credentials.credentials)
-    username: str | None = payload.get("sub")
-    if not username:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
-    return {"username": username}
-
-# Optional: allow unauthenticated in development for dashboard convenience
-# But rules.md says dashboard authentication required even on private network (MUST)
-# We'll enforce auth but provide dev bypass flag for tests
-ALLOW_DEV_BYPASS = _os.getenv("ALLOW_DEV_BYPASS", "false").lower() == "true"
-
-async def get_current_user_optional(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
-) -> Optional[dict]:
-    if ALLOW_DEV_BYPASS and get_settings().app_env == "development":
-        return {"username": "dev-bypass"}
-    return await get_current_user(credentials)
+    return {"username": payload["sub"]}

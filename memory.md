@@ -97,6 +97,8 @@ This document is the persistent project brief for future AI coding sessions. Rea
 
 The initial prototype was merged in GitHub PR #1. It contains backend and dashboard code, but phase exit gates have **not** been established by that merge. It is not ready for testnet order execution, live trading, or public deployment. Binance entries are locked in the real adapter and the real-adapter engine cannot start; mock tests are not evidence of exchange readiness. The adapter permits reduce-only/close-position requests for existing exposure, but their correctness is not verified.
 
+The local authentication boundary now requires configured operator credentials and protects HTTP/WebSocket routes; its process-local throttle and non-revocable tokens are not production-ready. See `docs/adr/0002-authentication-boundary.md` and `docs/SECURITY.md`.
+
 Next work should proceed in small, tested slices against the phase exit gates, beginning with safety and contract discovery. In particular, replace placeholder risk values, repair ambiguous-order reconciliation and protection/emergency behavior, verify Portfolio Margin and provider contracts, and review authentication and deployment security before considering any entry-lock removal. See the README for known blockers.
 
 ## 7. AI coding agent operating instructions

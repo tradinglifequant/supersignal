@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.schemas import EngineStatusResponse, EngineActionRequest
-from app.security.auth import get_current_user, get_current_user_optional
+from app.security.auth import get_current_user
 from app.core.config import get_settings
 # Engine service is singleton-like; we instantiate per request with shared adapter mock if needed
 from app.exchange.binance_adapter import BinanceAdapter

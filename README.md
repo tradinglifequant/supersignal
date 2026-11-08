@@ -14,7 +14,7 @@ Important outstanding blockers include:
 - Risk checks use placeholder P&L and drawdown values; hard limits and concurrency are not comprehensively enforced.
 - Ambiguous order submissions, fills, protection failures, restart/reconciliation, and emergency handling are not adequately safe or tested.
 - ThreeRouter's actual API contract and the required market-data feeds remain unverified; the current client contains assumptions, not a confirmed integration.
-- The default development login and JWT secret are insecure; authentication, secret management, auditability, and deployment need a security review. Never expose this prototype to an untrusted network or use real credentials.
+- Authentication and deployment still need a full security review, including distributed rate limiting and server-side session revocation. Never expose this prototype to an untrusted network or use real credentials.
 - Phase exit gates in `phases.md` are goals, not evidence of completion. No testnet or live exchange validation is claimed.
 
 ## Local development
@@ -28,10 +28,22 @@ python -m venv .venv
 # Windows: .venv\Scripts\activate
 # Linux/macOS: source .venv/bin/activate
 pip install -r backend/requirements.txt
+# Copy .env.example to backend/.env, then configure ADMIN_USERNAME,
+# ADMIN_PASSWORD_HASH and a unique JWT_SECRET_KEY (see below).
 cd backend
 alembic upgrade head
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
+
+### Configure the local operator
+
+Copy `.env.example` to `backend/.env` (the backend reads `.env` from its working directory). Set a unique `JWT_SECRET_KEY` with at least 32 characters, for example generate one with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Create the bcrypt `ADMIN_PASSWORD_HASH` with the following command; it prompts without echoing your password. Paste the resulting hash and signing key into `backend/.env` locally, not into chat or version control:
+
+```bash
+python -c "import getpass; from passlib.hash import bcrypt; print(bcrypt.hash(getpass.getpass('Operator password: ')))"
+```
+
+There is no default password or development authentication bypass. Without a valid hash and signing key, login fails closed. The browser holds the session token in memory; reload or sign-out clears it locally, but an already issued token remains valid until expiration. The process-wide login throttle is only a development safeguard, resets on restart and is not a distributed rate limiter. Health endpoints remain public; configure exact trusted `CORS_ORIGINS` for browser access.
 
 Frontend (in another terminal):
 

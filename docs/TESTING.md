@@ -1,31 +1,9 @@
-# Testing Strategy
+# Testing status
 
-## Pyramid
+From the repository root, install `backend/requirements.txt` and run `PYTHONPATH=backend pytest backend/tests`. In `frontend`, run `npm ci`, `npm test` and `npm run build`. The frontend tests run without coverage reporting. Frontend `npm run lint` currently has no ESLint configuration and is not yet usable.
 
-| Layer | Coverage | Tools |
-|-------|----------|-------|
-| Unit | Trigger, Risk, Execution, Security | pytest |
-| Integration | Binance mock, AI mock, WS reconnect | pytest-asyncio |
-| API | Health, Auth, Config, Trades, Metrics | FastAPI TestClient |
-| E2E | Paper trading replay | manual/testnet |
-| Performance | Symbol universe load, AI concurrency | locust (future) |
+The backend suite contains unit and mock tests for trigger, risk, execution, AI, security and API behavior. `test_auth_boundary.py` additionally checks private HTTP endpoints, configuration failures, login throttling, token validation, WebSocket authentication/origin/expiry and credential-test response redaction. The frontend hook tests exercise WebSocket authentication and cleanup.
 
-## Current Suite (50 tests, all passing)
+These tests do **not** establish execution idempotency, protection, recovery, real-account permissions, Portfolio Margin compatibility, or production readiness. In particular, current execution tests do not adequately simulate all ambiguous submissions and reconciliation failures. The Binance entry lock remains in place on testnet and live.
 
-- `test_trigger_engine.py` — FR-02 acceptance: +1.5%, -1.5%, exact threshold, below, zero, missing lookback, stale, out-of-order, window boundary.
-- `test_risk_engine.py` — FR-04: approved/rejected, rounding, min_notional, stop direction, fees/slippage, next margin, Portfolio Margin headroom, global limits, tick rounding.
-- `test_execution_idempotency.py` — FR-05: no duplicate after timeout, retry only when absent, non-retryable not retried.
-- `test_ai_pipeline.py` — FR-03: parallel timing, timeout→NO, INSUFFICIENT_DATA→NO, contradictory, malformed, mandatory check.
-- `test_security.py` — encryption roundtrip, masking, JWT, hard limits, log redaction.
-- `test_api.py` — health/ready, auth, config, metrics, market, engine status.
-
-## Testnet Integration (To Do Before LIVE)
-- [ ] Run on Binance Testnet (https://testnet.binancefuture.com) for 1 week with real WS + mock AI.
-- [ ] Verify full lifecycle: trigger → AI → risk → market order → TP/SL → monitor → cleaner.
-- [ ] Simulate WS disconnect, DB kill, process restart, partial fill.
-
-## Failure & Recovery Tests
-- WS down → block signals, reconnect, reconcile (covered in WS manager).
-- Binance timeout → query-by-clientId before retry (covered).
-- TP/SL rejected → repair then emergency close (covered).
-- DB unavailable → block entries, keep protection if possible (stubbed, needs resilience test).
+Still required by `phases.md`: exchange and provider contract verification; recorded market replay and reconnect tests; comprehensive risk, order ambiguity, partial-fill, protection, emergency and restart tests; real testnet lifecycle and long observation; Windows and PostgreSQL migration rehearsals; frontend coverage/accessibility; security, recovery and load reviews. No testnet or live success is claimed.
