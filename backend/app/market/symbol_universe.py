@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timezone
-from typing import List, Dict, Optional
-from decimal import Decimal
+import logging
+from typing import Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
-from app.exchange.interface import ExchangeAdapter, SymbolMetadataDTO
 from app.db.models import SymbolMetadata
+from app.exchange.interface import ExchangeAdapter, SymbolMetadataDTO
 
 logger = logging.getLogger(__name__)
+
 
 class SymbolUniverseService:
     def __init__(self, adapter: ExchangeAdapter, db: Session):
@@ -22,11 +22,12 @@ class SymbolUniverseService:
         try:
             symbols = await self.adapter.get_eligible_symbols()
         except Exception as e:
-            logger.error(f"Failed to fetch eligible symbols: {e}")
+            logger.error("Failed to fetch eligible symbols: %s", e)
             raise
         now = datetime.now(timezone.utc)
+        eligible_names = {dto.symbol for dto in symbols}
+        self._cache.clear()
         for dto in symbols:
-            # Upsert DB
             existing = self.db.query(SymbolMetadata).filter(SymbolMetadata.symbol == dto.symbol).first()
             if existing:
                 existing.status = dto.status
@@ -60,10 +61,21 @@ class SymbolUniverseService:
                 )
                 self.db.add(rec)
             self._cache[dto.symbol] = dto
+
+        # Mark previously eligible symbols that disappeared from exchange metadata as ineligible
+        stale_rows = (
+            self.db.query(SymbolMetadata)
+            .filter(SymbolMetadata.is_eligible == True)  # noqa: E712
+            .all()
+        )
+        for row in stale_rows:
+            if row.symbol not in eligible_names:
+                row.is_eligible = False
+                row.ineligibility_reason = "Excluded or paused in latest exchange metadata"
+                row.updated_at = now
+
         self.db.commit()
-        # Mark ineligible those not in fresh list? We keep but not is_eligible if delisted
-        # For now, just return
-        logger.info(f"Symbol universe refreshed: {len(symbols)} eligible")
+        logger.info("Symbol universe refreshed: %d eligible", len(symbols))
         return symbols
 
     def get_cached(self, symbol: str) -> Optional[SymbolMetadataDTO]:

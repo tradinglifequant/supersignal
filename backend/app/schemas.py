@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Optional, Literal, Any
+from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field, field_validator
+
 
 # ---------- Common ----------
 
@@ -13,10 +14,12 @@ class HealthResponse(BaseModel):
     environment: str
     timestamp: datetime
 
+
 class ReadyResponse(BaseModel):
     ready: bool
     checks: dict[str, Any]
     timestamp: datetime
+
 
 # ---------- Config ----------
 
@@ -32,15 +35,16 @@ class ConfigResponse(BaseModel):
     daily_loss_limit: str
     max_drawdown_pct: str
     max_aggregate_exposure: str
+    max_consecutive_losses: int = 5
     max_slippage_bps: str
     taker_fee_bps: str
     candidate_ttl_seconds: int
     cooldown_seconds: int
     protection_deadline_seconds: int
-    # secrets masked
     binance_testnet: bool
     binance_configured: bool
     threerouter_configured: bool
+
 
 class ConfigUpdateRequest(BaseModel):
     trigger_percentage: Optional[Decimal] = None
@@ -53,7 +57,13 @@ class ConfigUpdateRequest(BaseModel):
     daily_loss_limit: Optional[Decimal] = None
     max_drawdown_pct: Optional[Decimal] = None
     max_aggregate_exposure: Optional[Decimal] = None
+    max_consecutive_losses: Optional[int] = None
     max_slippage_bps: Optional[Decimal] = None
+    taker_fee_bps: Optional[Decimal] = None
+    candidate_ttl_seconds: Optional[int] = None
+    cooldown_seconds: Optional[int] = None
+    protection_deadline_seconds: Optional[int] = None
+
 
 # ---------- Credentials ----------
 
@@ -63,16 +73,19 @@ class CredentialTestRequest(BaseModel):
     api_secret: str
     testnet: bool = True
 
+
 class CredentialTestResponse(BaseModel):
     valid: bool
     account_info: Optional[dict] = None
     message: str
+
 
 class CredentialsSaveRequest(BaseModel):
     exchange: str = "binance"
     environment: str = "testnet"
     api_key: str
     api_secret: str
+
 
 # ---------- Engine ----------
 
@@ -89,9 +102,11 @@ class EngineStatusResponse(BaseModel):
     open_positions: int = 0
     unprotected_positions: int = 0
 
+
 class EngineActionRequest(BaseModel):
     confirm: bool = False
     reason: Optional[str] = None
+
 
 # ---------- Market ----------
 
@@ -109,6 +124,7 @@ class SymbolInfo(BaseModel):
     last_price: Optional[str] = None
     change_pct_180s: Optional[str] = None
 
+
 # ---------- Signals ----------
 
 class SignalCandidateResponse(BaseModel):
@@ -125,6 +141,7 @@ class SignalCandidateResponse(BaseModel):
     expires_at: datetime
     status: str
     rejection_reason: Optional[str] = None
+
 
 # ---------- AI ----------
 
@@ -148,6 +165,7 @@ class AIAgentResponseBase(BaseModel):
             raise ValueError("confidence must be 0-1")
         return v
 
+
 class Agent6Response(BaseModel):
     agent_name: str = "agent-6"
     schema_version: str = "1.0"
@@ -159,6 +177,7 @@ class Agent6Response(BaseModel):
     invalidation_conditions: Optional[str] = None
     created_at: datetime
     aggregated_from: list[str] = Field(default_factory=list)
+
 
 # ---------- Risk ----------
 
@@ -172,6 +191,7 @@ class RiskApproval(BaseModel):
     allocated_margin: str
     take_profit: Optional[str] = None
     stop_loss: Optional[str] = None
+
 
 # ---------- Trades ----------
 
@@ -199,6 +219,7 @@ class TradeResponse(BaseModel):
     created_at: datetime
     closed_at: Optional[datetime] = None
 
+
 class OrderResponse(BaseModel):
     id: str
     trade_id: Optional[str] = None
@@ -215,6 +236,7 @@ class OrderResponse(BaseModel):
     submitted_at: datetime
     updated_at: datetime
 
+
 # ---------- Logs ----------
 
 class SystemLogResponse(BaseModel):
@@ -226,6 +248,7 @@ class SystemLogResponse(BaseModel):
     trade_id: Optional[str] = None
     symbol: Optional[str] = None
     created_at: datetime
+
 
 class AgentLogResponse(BaseModel):
     id: str
@@ -240,6 +263,7 @@ class AgentLogResponse(BaseModel):
     latency_ms: Optional[int] = None
     error_message: Optional[str] = None
     created_at: datetime
+
 
 # ---------- Metrics ----------
 
@@ -257,21 +281,22 @@ class MetricsResponse(BaseModel):
     current_drawdown: str
     daily_pnl: str
 
+
 # ---------- Auth ----------
 
 class LoginRequest(BaseModel):
     username: str
     password: str
 
+
 class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
 
 # ---------- WebSocket ----------
 
 class WSEvent(BaseModel):
     type: str
     payload: dict
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc) if 'timezone' in dir(__import__('datetime')) else datetime.utcnow())
-
-from datetime import timezone
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

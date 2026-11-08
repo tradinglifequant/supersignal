@@ -1,19 +1,19 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from datetime import datetime, timezone, timedelta
-from typing import Optional, Literal
-import uuid
 import logging
+from typing import Literal, Optional
+import uuid
 
+from app.core.config import Settings
 from app.market.price_history import PriceHistory
 from app.utils.decimal import calc_change_pct
-from app.core.config import Settings
-from app.db.models import SignalCandidate
 
 logger = logging.getLogger(__name__)
 
 Direction = Literal["LONG", "SHORT"]
+
 
 class TriggerResult:
     def __init__(
@@ -36,7 +36,8 @@ class TriggerResult:
         self.exchange_event_time = exchange_event_time
         self.detected_at = detected_at
         self.event_id = str(uuid.uuid4())
-        self.event_key = f"{symbol}:{direction}:{int(detected_at.timestamp() // 30)}"  # 30s bucket for dedup
+        self.event_key = f"{symbol}:{direction}:{int(detected_at.timestamp() // 30)}"
+
 
 class TriggerEngine:
     """
@@ -51,43 +52,52 @@ class TriggerEngine:
         self.history = price_history
         self.settings = settings
 
-    def evaluate(self, symbol: str, now_wall: datetime | None = None) -> Optional[TriggerResult]:
+    def evaluate(
+        self,
+        symbol: str,
+        now_wall: datetime | None = None,
+        trigger_percentage: Decimal | None = None,
+        window_seconds: int | None = None,
+    ) -> Optional[TriggerResult]:
         if now_wall is None:
             now_wall = datetime.now(timezone.utc)
+        elif now_wall.tzinfo is None:
+            now_wall = now_wall.replace(tzinfo=timezone.utc)
+
         last_sample = self.history.get_last_price(symbol)
         if not last_sample:
             return None
-        # freshness guard: exchange event time not too old, receipt staleness
+        if self.history.is_out_of_order(symbol):
+            logger.debug("Out-of-order tick for %s, blocking trigger", symbol)
+            return None
         if self.history.is_stale(symbol, now_wall, stale_threshold_seconds=60):
-            logger.debug(f"Stale feed {symbol}, blocking trigger")
+            logger.debug("Stale feed %s, blocking trigger", symbol)
             return None
         staleness = now_wall - last_sample.exchange_time
         if staleness > timedelta(seconds=30):
-            logger.debug(f"Last price too stale for {symbol}: {staleness}")
+            logger.debug("Last price too stale for %s: %s", symbol, staleness)
             return None
 
-        # Validate price positive
         if last_sample.price <= Decimal("0"):
-            logger.warning(f"Invalid price for {symbol}: {last_sample.price}")
+            logger.warning("Invalid price for %s: %s", symbol, last_sample.price)
             return None
 
-        window = self.settings.trigger_window_seconds
+        window = window_seconds if window_seconds is not None else self.settings.trigger_window_seconds
         ref_sample = self.history.get_reference_price(symbol, window, now_wall)
         if not ref_sample:
             return None
         if ref_sample.price <= Decimal("0"):
-            logger.warning(f"Invalid reference price {symbol}: {ref_sample.price}")
+            logger.warning("Invalid reference price %s: %s", symbol, ref_sample.price)
             return None
 
         try:
             change_pct = calc_change_pct(last_sample.price, ref_sample.price)
         except (InvalidOperation, ValueError, ZeroDivisionError) as e:
-            logger.error(f"calc error {symbol}: {e}")
+            logger.error("calc error %s: %s", symbol, e)
             return None
 
-        threshold = self.settings.trigger_percentage
+        threshold = trigger_percentage if trigger_percentage is not None else self.settings.trigger_percentage
         direction: Optional[Direction] = None
-        # Exact threshold boundary: >= and <=
         if change_pct >= threshold:
             direction = "LONG"
         elif change_pct <= -threshold:
@@ -105,5 +115,12 @@ class TriggerEngine:
             exchange_event_time=last_sample.exchange_time,
             detected_at=now_wall,
         )
-        logger.info(f"Trigger {symbol} {direction} {change_pct:.4f}% now={last_sample.price} ref={ref_sample.price}")
+        logger.info(
+            "Trigger %s %s %.4f%% now=%s ref=%s",
+            symbol,
+            direction,
+            change_pct,
+            last_sample.price,
+            ref_sample.price,
+        )
         return result

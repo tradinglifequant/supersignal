@@ -11,9 +11,13 @@ ENV/
 .env.local
 .env.production
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 instance/
+data/
+backend/data/
 
 # Node
 node_modules/
@@ -52,4 +56,5 @@ htmlcov/
 
 # Build
 *.egg-info/
+backend/*.egg-info/
 frontend/data

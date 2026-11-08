@@ -1,24 +1,35 @@
 from __future__ import annotations
 
-import base64
-import os
+import logging
 from cryptography.fernet import Fernet, InvalidToken
 
 from app.core.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+_DEV_EPHEMERAL_KEY: str | None = None
 
 
 def generate_key() -> str:
     return Fernet.generate_key().decode()
 
 
+def reset_encryption_cache() -> None:
+    global _DEV_EPHEMERAL_KEY
+    _DEV_EPHEMERAL_KEY = None
+
+
 def get_fernet(key: str | None = None) -> Fernet:
+    global _DEV_EPHEMERAL_KEY
     settings = get_settings()
     k = key or settings.credentials_encryption_key
     if not k:
-        # For dev/test, generate ephemeral key (not persisted)
-        # In production this MUST be set via env
-        k = generate_key()
-    # Validate
+        if settings.is_production:
+            raise ValueError("CREDENTIALS_ENCRYPTION_KEY must be configured in production")
+        if _DEV_EPHEMERAL_KEY is None:
+            _DEV_EPHEMERAL_KEY = generate_key()
+            logger.warning("CREDENTIALS_ENCRYPTION_KEY not set; using process-local ephemeral key for non-production")
+        k = _DEV_EPHEMERAL_KEY
     try:
         return Fernet(k.encode() if isinstance(k, str) else k)
     except Exception as e:

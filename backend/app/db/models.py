@@ -6,7 +6,15 @@ from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import (
-    String, DateTime, Numeric, Integer, Boolean, Text, ForeignKey, Index, UniqueConstraint, func, Enum as SAEnum
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    TypeDecorator,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -16,15 +24,31 @@ from app.db.base import Base
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
+
+def ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def uuid_str() -> str:
     return str(uuid.uuid4())
 
-# Enums as string check constraints via Python; use String columns
-# Direction: LONG, SHORT
-# CandidateStatus: DETECTED, PROCESSING, APPROVED, REJECTED, EXPIRED
-# TradeStatus: PENDING, OPEN, PROTECTED, CLOSING, CLOSED, FAILED, EMERGENCY_CLOSED
-# OrderStatus: NEW, PARTIALLY_FILLED, FILLED, CANCELED, REJECTED, EXPIRED, PENDING_CANCEL
-# EngineState: STOPPED, STARTING, READY, RUNNING, STOPPING, HALTED_RISK, EMERGENCY, ERROR, DEGRADED
+
+class UTCDateTime(TypeDecorator):
+    """Ensures timezone-aware UTC datetimes round-trip consistently on both SQLite and PostgreSQL."""
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return ensure_utc(value)
+
+    def process_result_value(self, value, dialect):
+        return ensure_utc(value)
+
 
 class AppConfig(Base):
     __tablename__ = "app_config"
@@ -40,44 +64,44 @@ class AppConfig(Base):
     daily_loss_limit: Mapped[Decimal] = mapped_column(Numeric(20, 8), default=Decimal("50"))
     max_drawdown_pct: Mapped[Decimal] = mapped_column(Numeric(10, 4), default=Decimal("10"))
     max_aggregate_exposure: Mapped[Decimal] = mapped_column(Numeric(20, 8), default=Decimal("1000"))
+    max_consecutive_losses: Mapped[int] = mapped_column(Integer, default=5)
     max_slippage_bps: Mapped[Decimal] = mapped_column(Numeric(10, 4), default=Decimal("50"))
     taker_fee_bps: Mapped[Decimal] = mapped_column(Numeric(10, 4), default=Decimal("4"))
     candidate_ttl_seconds: Mapped[int] = mapped_column(Integer, default=30)
     cooldown_seconds: Mapped[int] = mapped_column(Integer, default=300)
     protection_deadline_seconds: Mapped[int] = mapped_column(Integer, default=10)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 
 
 class ExchangeCredential(Base):
     __tablename__ = "exchange_credentials"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
     exchange: Mapped[str] = mapped_column(String(50), default="binance")
-    environment: Mapped[str] = mapped_column(String(20), default="testnet")  # testnet|live
+    environment: Mapped[str] = mapped_column(String(20), default="testnet")
     api_key_ciphertext: Mapped[str] = mapped_column(Text)
     api_secret_ciphertext: Mapped[str] = mapped_column(Text)
     encryption_key_version: Mapped[int] = mapped_column(Integer, default=1)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    rotated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_tested_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    rotated_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    last_tested_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
 
 class SignalCandidate(Base):
     __tablename__ = "signal_candidates"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
-    event_key: Mapped[str] = mapped_column(String(200), unique=True, index=True)  # symbol+direction+bucket
+    event_key: Mapped[str] = mapped_column(String(200), unique=True, index=True)
     symbol: Mapped[str] = mapped_column(String(20), index=True)
-    direction: Mapped[str] = mapped_column(String(10))  # LONG|SHORT
+    direction: Mapped[str] = mapped_column(String(10))
     current_price: Mapped[Decimal] = mapped_column(Numeric(20, 8))
     reference_price: Mapped[Decimal] = mapped_column(Numeric(20, 8))
     change_pct: Mapped[Decimal] = mapped_column(Numeric(20, 8))
     window_seconds: Mapped[int] = mapped_column(Integer, default=180)
-    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
-    exchange_event_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    detected_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
+    exchange_event_time: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
     status: Mapped[str] = mapped_column(String(30), default="DETECTED", index=True)
     rejection_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # snapshot
-    snapshot_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON dump
+    snapshot_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     trades: Mapped[list["Trade"]] = relationship(back_populates="candidate")
 
@@ -87,13 +111,13 @@ class Trade(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
     candidate_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("signal_candidates.id"), nullable=True)
     symbol: Mapped[str] = mapped_column(String(20), index=True)
-    side: Mapped[str] = mapped_column(String(10))  # BUY|SELL (LONG entry BUY, SHORT SELL)
-    direction: Mapped[str] = mapped_column(String(10))  # LONG|SHORT
+    side: Mapped[str] = mapped_column(String(10))
+    direction: Mapped[str] = mapped_column(String(10))
     entry_order_client_id: Mapped[str] = mapped_column(String(64), unique=True)
     entry_order_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     entry_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 8), nullable=True)
     exit_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 8), nullable=True)
-    position_size: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 8), nullable=True)  # quantity
+    position_size: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 8), nullable=True)
     notional: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 8), nullable=True)
     margin_allocation: Mapped[Decimal] = mapped_column(Numeric(20, 8))
     leverage: Mapped[int] = mapped_column(Integer)
@@ -105,8 +129,8 @@ class Trade(Base):
     funding: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 8), nullable=True, default=Decimal("0"))
     status: Mapped[str] = mapped_column(String(30), default="PENDING", index=True)
     close_reason: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
-    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
     candidate: Mapped[Optional[SignalCandidate]] = relationship(back_populates="trades")
     orders: Mapped[list["Order"]] = relationship(back_populates="trade", cascade="all, delete-orphan")
@@ -119,15 +143,15 @@ class Order(Base):
     client_order_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     exchange_order_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     symbol: Mapped[str] = mapped_column(String(20))
-    order_type: Mapped[str] = mapped_column(String(30))  # MARKET, STOP_MARKET, TAKE_PROFIT_MARKET, etc.
-    side: Mapped[str] = mapped_column(String(10))  # BUY|SELL
+    order_type: Mapped[str] = mapped_column(String(30))
+    side: Mapped[str] = mapped_column(String(10))
     reduce_only: Mapped[bool] = mapped_column(Boolean, default=False)
     quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8))
     price: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 8), nullable=True)
     trigger_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 8), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="NEW")
-    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    submitted_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 
     trade: Mapped[Optional[Trade]] = relationship(back_populates="orders")
 
@@ -144,10 +168,10 @@ class AgentLog(Base):
     schema_version: Mapped[str] = mapped_column(String(20), default="1.0")
     request_hash: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     response_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    validation_status: Mapped[str] = mapped_column(String(20), default="PENDING")  # VALID|INVALID|TIMEOUT
+    validation_status: Mapped[str] = mapped_column(String(20), default="PENDING")
     latency_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
 
 
 class SystemLog(Base):
@@ -159,15 +183,15 @@ class SystemLog(Base):
     correlation_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
     trade_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     symbol: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
 
 
 class EngineStateRecord(Base):
     __tablename__ = "engine_state"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
-    state: Mapped[str] = mapped_column(String(30), index=True)  # STOPPED, etc.
+    state: Mapped[str] = mapped_column(String(30), index=True)
     environment: Mapped[str] = mapped_column(String(20), default="testnet")
-    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    changed_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
@@ -179,7 +203,7 @@ class AuditEvent(Base):
     before_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     after_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     correlation_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
 
 
 class EquitySnapshot(Base):
@@ -189,7 +213,7 @@ class EquitySnapshot(Base):
     account_equity: Mapped[Decimal] = mapped_column(Numeric(20, 8))
     available_balance: Mapped[Decimal] = mapped_column(Numeric(20, 8))
     unrealized_pnl: Mapped[Decimal] = mapped_column(Numeric(20, 8), default=Decimal("0"))
-    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    captured_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
 
 
 class MarginScalingEvent(Base):
@@ -200,16 +224,16 @@ class MarginScalingEvent(Base):
     realized_net_profit: Mapped[Decimal] = mapped_column(Numeric(20, 8))
     reinvestment_pct: Mapped[Decimal] = mapped_column(Numeric(10, 4))
     next_margin: Mapped[Decimal] = mapped_column(Numeric(20, 8))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class SymbolMetadata(Base):
     __tablename__ = "symbol_metadata"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
     symbol: Mapped[str] = mapped_column(String(20), unique=True, index=True)
-    status: Mapped[str] = mapped_column(String(20))  # TRADING, etc.
-    contract_type: Mapped[str] = mapped_column(String(30))  # PERPETUAL
-    margin_asset: Mapped[str] = mapped_column(String(20))  # USDT
+    status: Mapped[str] = mapped_column(String(20))
+    contract_type: Mapped[str] = mapped_column(String(30))
+    margin_asset: Mapped[str] = mapped_column(String(20))
     price_precision: Mapped[int] = mapped_column(Integer)
     quantity_precision: Mapped[int] = mapped_column(Integer)
     price_tick: Mapped[Decimal] = mapped_column(Numeric(20, 8))
@@ -219,7 +243,8 @@ class SymbolMetadata(Base):
     max_qty: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 8), nullable=True)
     is_eligible: Mapped[bool] = mapped_column(Boolean, default=False)
     ineligibility_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
 
 # Indexes
 Index("ix_trades_status_created", Trade.status, Trade.created_at)

@@ -1,17 +1,18 @@
-version: "3.9"
 services:
   api:
     build:
       context: .
       dockerfile: deploy/Dockerfile.backend
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1"
     ports:
       - "8000:8000"
     env_file: .env
     environment:
-      - DATABASE_URL=postgresql+psycopg://user:pass@postgres:5432/supersignal?sslmode=require
+      # Local compose postgres runs without TLS; set sslmode=require for managed production PostgreSQL.
+      - DATABASE_URL=${COMPOSE_DATABASE_URL:-postgresql+psycopg://user:pass@postgres:5432/supersignal?sslmode=disable}
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
@@ -27,19 +28,22 @@ services:
       - "5173:80"
     depends_on:
       - api
-    environment:
-      - VITE_API_BASE_URL=http://localhost:8000
 
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: pass
-      POSTGRES_DB: supersignal
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pass}
+      POSTGRES_DB: ${POSTGRES_DB:-supersignal}
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-supersignal}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
 volumes:
   pgdata:

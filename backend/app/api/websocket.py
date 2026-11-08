@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import json
 import logging
 import time
-from datetime import datetime, timezone
 from typing import Set
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from app.core.config import get_settings
-from app.security.auth import decode_token
+from app.security.auth import decode_token, is_jti_revoked
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -46,6 +46,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         await websocket.close(code=4003)
         return
     await websocket.accept()
+    jti = None
     try:
         # Authenticate in the first frame, not in a URL that may be logged.
         message = await asyncio.wait_for(websocket.receive_json(), timeout=5)
@@ -53,6 +54,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             await websocket.close(code=4001)
             return
         payload = decode_token(message["token"])
+        jti = payload.get("jti")
         expires_at = int(payload["exp"])
         if expires_at <= time.time():
             await websocket.close(code=4001)
@@ -65,15 +67,25 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     manager.connect(websocket)
     try:
-        await websocket.send_json({"type": "snapshot", "payload": {"message": "connected", "timestamp": datetime.now(timezone.utc).isoformat()}})
+        await websocket.send_json(
+            {
+                "type": "snapshot",
+                "payload": {"message": "connected", "timestamp": datetime.now(timezone.utc).isoformat()},
+            }
+        )
         while True:
             remaining = expires_at - time.time()
-            if remaining <= 0:
+            if remaining <= 0 or is_jti_revoked(jti):
                 await websocket.close(code=4001)
                 break
             try:
-                msg = await asyncio.wait_for(websocket.receive_json(), timeout=remaining)
+                msg = await asyncio.wait_for(websocket.receive_json(), timeout=min(remaining, 5.0))
             except asyncio.TimeoutError:
+                if expires_at <= time.time() or is_jti_revoked(jti):
+                    await websocket.close(code=4001)
+                    break
+                continue
+            if is_jti_revoked(jti):
                 await websocket.close(code=4001)
                 break
             if isinstance(msg, dict) and msg.get("type") == "ping":
@@ -89,4 +101,6 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
 
 async def broadcast_event(event_type: str, payload: dict) -> None:
-    await manager.broadcast({"type": event_type, "payload": payload, "timestamp": datetime.now(timezone.utc).isoformat()})
+    await manager.broadcast(
+        {"type": event_type, "payload": payload, "timestamp": datetime.now(timezone.utc).isoformat()}
+    )

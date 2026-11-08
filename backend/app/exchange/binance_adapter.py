@@ -2,26 +2,48 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import time
-import urllib.parse
-from decimal import Decimal
-from typing import Optional, List, Dict, Any
 import logging
+import time
+from decimal import Decimal
+from typing import Any, List, Optional
+import urllib.parse
 
 import httpx
 
 from app.core.config import get_settings
-from app.exchange.interface import ExchangeAdapter, SymbolMetadataDTO, BalanceDTO, PositionDTO, OrderResultDTO
-from app.security.encryption import decrypt_value
-from app.db.session import get_sync_session_factory
-from app.db.models import ExchangeCredential, SystemLog
-from datetime import datetime, timezone
+from app.exchange.interface import (
+    BalanceDTO,
+    ExchangeAdapter,
+    OrderResultDTO,
+    PositionDTO,
+    SymbolMetadataDTO,
+)
 
 logger = logging.getLogger(__name__)
 
-# Binance error codes that are NOT retryable
-NON_RETRYABLE_CODES = {-2010, -2011, -2015, -2018, -2021, -1100, -1101, -1102, -1104, -1111, -1112, -1117, -1121, -4003, -4004, -4005}
-RETRYABLE_CODES = {-1000, -1001, -1003, -1016, -1021}  # timeout, rate limit, etc. Use carefully
+NON_RETRYABLE_CODES = {
+    -2010,
+    -2011,
+    -2015,
+    -2018,
+    -2021,
+    -2022,
+    -1100,
+    -1101,
+    -1102,
+    -1104,
+    -1111,
+    -1112,
+    -1117,
+    -1121,
+    -4003,
+    -4004,
+    -4005,
+    -4016,
+}
+RETRYABLE_CODES = {-1000, -1001, -1003, -1016, -1021}
+ORDER_NOT_FOUND_CODE = -2013
+
 
 def _decimal(v: Any) -> Decimal:
     return Decimal(str(v))
@@ -34,20 +56,7 @@ class EntryLockedError(RuntimeError):
 class BinanceAdapter(ExchangeAdapter):
     """
     Binance USD-M Futures adapter.
-    Verified endpoints (2024-2026 docs):
-    - GET /fapi/v1/ping
-    - GET /fapi/v1/exchangeInfo
-    - GET /fapi/v1/ticker/price
-    - GET /fapi/v2/balance
-    - GET /fapi/v2/account  (includes feeTier, canTrade, etc.)
-    - GET /fapi/v2/positionRisk
-    - POST /fapi/v1/order
-    - GET /fapi/v1/order
-    - GET /fapi/v1/openOrders
-    - DELETE /fapi/v1/order
-    - DELETE /fapi/v1/allOpenOrders
-    - Portfolio Margin: GET /papi/v1/balance, /papi/v1/account etc. We attempt papi then fallback to fapi.
-    Research note: Portfolio Margin account compatibility must be verified per account; adapter tries papi first.
+    New exposure-increasing orders remain locked until full exchange & safety verification passes.
     """
 
     def __init__(self, api_key: str | None = None, api_secret: str | None = None, testnet: bool | None = None):
@@ -57,8 +66,11 @@ class BinanceAdapter(ExchangeAdapter):
         self.testnet = testnet if testnet is not None else settings.binance_testnet
         self.base_url = settings.binance_testnet_base_url if self.testnet else settings.binance_base_url
         self.recv_window = settings.binance_recv_window
-        self.client = httpx.AsyncClient(timeout=10.0, headers={"X-MBX-APIKEY": self.api_key} if self.api_key else {})
-        logger.info(f"BinanceAdapter initialized testnet={self.testnet} base={self.base_url}")
+        self.client = httpx.AsyncClient(
+            timeout=10.0,
+            headers={"X-MBX-APIKEY": self.api_key} if self.api_key else {},
+        )
+        logger.info("BinanceAdapter initialized testnet=%s base=%s", self.testnet, self.base_url)
 
     def _sign(self, params: dict) -> dict:
         if not self.api_secret:
@@ -78,7 +90,7 @@ class BinanceAdapter(ExchangeAdapter):
         try:
             resp = await self.client.request(method, url, params=params)
         except httpx.RequestError as e:
-            logger.error(f"Binance request error {method} {path}: {e}")
+            logger.error("Binance request error %s %s: %s", method, path, type(e).__name__)
             raise
 
         if resp.status_code != 200:
@@ -86,8 +98,7 @@ class BinanceAdapter(ExchangeAdapter):
                 body = resp.json()
             except Exception:
                 body = resp.text
-            logger.warning(f"Binance API error {resp.status_code} {path}: {body}")
-            # Raise with code if present
+            logger.warning("Binance API error %s %s: %s", resp.status_code, path, body)
             raise BinanceAPIError(resp.status_code, body)
 
         return resp.json()
@@ -107,63 +118,54 @@ class BinanceAdapter(ExchangeAdapter):
         symbols = info.get("symbols", [])
         result: List[SymbolMetadataDTO] = []
         for s in symbols:
-            # Filter per PRD: USDT-margined perpetual, TRADING
             symbol = s.get("symbol", "")
             status = s.get("status", "")
             contract_type = s.get("contractType", "")
             margin_asset = s.get("marginAsset", "")
-            if contract_type != "PERPETUAL":
+            if contract_type != "PERPETUAL" or margin_asset != "USDT" or status != "TRADING":
                 continue
-            if margin_asset != "USDT":
-                continue
-            if status != "TRADING":
-                continue
-            # parse filters
-            filters = {f["filterType"]: f for f in s.get("filters", [])}
+            filters = {f["filterType"]: f for f in s.get("filters", []) if "filterType" in f}
             price_filter = filters.get("PRICE_FILTER", {})
             lot_size = filters.get("LOT_SIZE", {})
             market_lot = filters.get("MARKET_LOT_SIZE", {})
-            min_notional = filters.get("MIN_NOTIONAL", {}) or filters.get("NOTIONAL", {}) or {}
+            min_notional = filters.get("MIN_NOTIONAL") or filters.get("NOTIONAL") or {}
 
             tick = _decimal(price_filter.get("tickSize", "0.01"))
             step = _decimal(lot_size.get("stepSize", "0.001"))
             min_qty = _decimal(lot_size.get("minQty", "0"))
-            # market lot may override
             if market_lot:
                 step = _decimal(market_lot.get("stepSize", step))
                 min_qty = _decimal(market_lot.get("minQty", min_qty))
 
-            min_not = _decimal(min_notional.get("notional", "5") if min_notional else "5")
-            # Binance often returns minNotional as string, or not present for some symbols
+            min_not_val = min_notional.get("notional") or min_notional.get("minNotional") or "5"
+            min_not = _decimal(min_not_val)
             try:
                 price_precision = int(s.get("pricePrecision", 2))
                 qty_precision = int(s.get("quantityPrecision", 3))
             except Exception:
                 price_precision, qty_precision = 2, 3
 
-            max_qty = None
-            if lot_size.get("maxQty"):
-                max_qty = _decimal(lot_size["maxQty"])
+            max_qty = _decimal(lot_size["maxQty"]) if lot_size.get("maxQty") else None
 
-            dto = SymbolMetadataDTO(
-                symbol=symbol,
-                status=status,
-                contract_type=contract_type,
-                margin_asset=margin_asset,
-                price_tick=tick,
-                qty_step=step,
-                min_qty=min_qty,
-                max_qty=max_qty,
-                min_notional=min_not,
-                price_precision=price_precision,
-                quantity_precision=qty_precision,
+            result.append(
+                SymbolMetadataDTO(
+                    symbol=symbol,
+                    status=status,
+                    contract_type=contract_type,
+                    margin_asset=margin_asset,
+                    price_tick=tick,
+                    qty_step=step,
+                    min_qty=min_qty,
+                    max_qty=max_qty,
+                    min_notional=min_not,
+                    price_precision=price_precision,
+                    quantity_precision=qty_precision,
+                )
             )
-            result.append(dto)
-        logger.info(f"Eligible symbols count: {len(result)}")
+        logger.info("Eligible symbols count: %d", len(result))
         return result
 
     async def get_account_info(self) -> dict:
-        # Try Portfolio Margin first, then fapi
         for path in ["/papi/v1/account", "/fapi/v2/account"]:
             try:
                 return await self._request("GET", path, signed=True)
@@ -171,11 +173,9 @@ class BinanceAdapter(ExchangeAdapter):
                 if e.status_code in (404, 400):
                     continue
                 raise
-        # fallback
         return await self._request("GET", "/fapi/v2/account", signed=True)
 
     async def get_balances(self) -> List[BalanceDTO]:
-        # Try papi balance, else fapi
         data = None
         for path in ["/papi/v1/balance", "/fapi/v2/balance"]:
             try:
@@ -191,7 +191,6 @@ class BinanceAdapter(ExchangeAdapter):
         balances: List[BalanceDTO] = []
         for item in data:
             asset = item.get("asset", "")
-            # papi and fapi have slightly different fields
             bal = _decimal(item.get("balance", item.get("walletBalance", "0")))
             avail = _decimal(item.get("availableBalance", item.get("crossWalletBalance", item.get("balance", "0"))))
             unreal = _decimal(item.get("crossUnPnl", item.get("crossUnrealizedPnl", "0")))
@@ -199,7 +198,6 @@ class BinanceAdapter(ExchangeAdapter):
         return balances
 
     async def get_positions(self) -> List[PositionDTO]:
-        # papi vs fapi
         data = None
         for path in ["/papi/v1/positionRisk", "/fapi/v2/positionRisk"]:
             try:
@@ -213,21 +211,19 @@ class BinanceAdapter(ExchangeAdapter):
             return []
         positions: List[PositionDTO] = []
         for p in data:
-            # positionRisk returns list with symbol, positionAmt, entryPrice, markPrice, unRealizedProfit, leverage, marginType
             amt = _decimal(p.get("positionAmt", "0"))
-            if amt == Decimal("0"):
-                # optionally skip zero, but return for reconciliation awareness
-                pass
-            positions.append(PositionDTO(
-                symbol=p.get("symbol", ""),
-                position_amt=amt,
-                entry_price=_decimal(p.get("entryPrice", "0")),
-                mark_price=_decimal(p.get("markPrice", "0")),
-                unrealized_profit=_decimal(p.get("unRealizedProfit", p.get("unrealizedProfit", "0"))),
-                leverage=int(float(p.get("leverage", "10"))),
-                margin_type=p.get("marginType", "cross"),
-                isolated_margin=_decimal(p.get("isolatedMargin", "0")) if p.get("isolatedMargin") else None,
-            ))
+            positions.append(
+                PositionDTO(
+                    symbol=p.get("symbol", ""),
+                    position_amt=amt,
+                    entry_price=_decimal(p.get("entryPrice", "0")),
+                    mark_price=_decimal(p.get("markPrice", "0")),
+                    unrealized_profit=_decimal(p.get("unRealizedProfit", p.get("unrealizedProfit", "0"))),
+                    leverage=int(float(p.get("leverage", "10"))),
+                    margin_type=p.get("marginType", "cross"),
+                    isolated_margin=_decimal(p.get("isolatedMargin", "0")) if p.get("isolatedMargin") else None,
+                )
+            )
         return positions
 
     async def get_open_orders(self, symbol: Optional[str] = None) -> List[OrderResultDTO]:
@@ -272,18 +268,18 @@ class BinanceAdapter(ExchangeAdapter):
             params["reduceOnly"] = "true"
         if close_position:
             params["closePosition"] = "true"
-            # closePosition orders must not have quantity
             params.pop("quantity", None)
         if position_side:
             params["positionSide"] = position_side
         if working_type:
             params["workingType"] = working_type
-        # For market orders, additional params like timeInForce not needed
 
         data = await self._request("POST", "/fapi/v1/order", params=params, signed=True)
         return self._to_order_dto(data)
 
-    async def query_order(self, symbol: str, order_id: Optional[int] = None, client_order_id: Optional[str] = None) -> OrderResultDTO:
+    async def query_order(
+        self, symbol: str, order_id: Optional[int] = None, client_order_id: Optional[str] = None
+    ) -> OrderResultDTO:
         params: dict[str, Any] = {"symbol": symbol}
         if order_id is not None:
             params["orderId"] = str(order_id)
@@ -292,7 +288,9 @@ class BinanceAdapter(ExchangeAdapter):
         data = await self._request("GET", "/fapi/v1/order", params=params, signed=True)
         return self._to_order_dto(data)
 
-    async def cancel_order(self, symbol: str, order_id: Optional[int] = None, client_order_id: Optional[str] = None) -> OrderResultDTO:
+    async def cancel_order(
+        self, symbol: str, order_id: Optional[int] = None, client_order_id: Optional[str] = None
+    ) -> OrderResultDTO:
         params: dict[str, Any] = {"symbol": symbol}
         if order_id is not None:
             params["orderId"] = str(order_id)
@@ -309,16 +307,14 @@ class BinanceAdapter(ExchangeAdapter):
             return False, "API key/secret not configured", None
         try:
             acct = await self.get_account_info()
-            # Check canTrade
             can_trade = acct.get("canTrade", True)
             if not can_trade:
                 return False, "Account cannot trade (canTrade=false)", acct
-            # Check withdrawal? Binance account info doesn't directly show withdrawal permission, but we warn operator
             return True, "Credentials valid", acct
         except BinanceAPIError as e:
-            return False, f"Validation failed: {e.body}", None
-        except Exception as e:
-            return False, f"Validation error: {e}", None
+            return False, f"Validation failed (HTTP {e.status_code})", None
+        except Exception:
+            return False, "Validation error", None
 
     def _to_order_dto(self, data: dict) -> OrderResultDTO:
         return OrderResultDTO(
@@ -330,7 +326,7 @@ class BinanceAdapter(ExchangeAdapter):
             order_type=data.get("type", ""),
             orig_qty=_decimal(data.get("origQty", data.get("quantity", "0"))),
             executed_qty=_decimal(data.get("executedQty", "0")),
-            avg_price=_decimal(data.get("avgPrice", "0")) if str(data.get("avgPrice", "0")) != "0" else None,
+            avg_price=_decimal(data.get("avgPrice", "0")) if str(data.get("avgPrice", "0")) not in ("0", "0.0", "0.00000") else None,
             price=_decimal(data["price"]) if data.get("price") not in (None, "", 0, "0") else None,
             stop_price=_decimal(data["stopPrice"]) if data.get("stopPrice") not in (None, "", 0, "0") else None,
             reduce_only=(str(data.get("reduceOnly", "")).lower() == "true" or data.get("reduceOnly") is True),
@@ -352,6 +348,9 @@ class BinanceAPIError(Exception):
         if isinstance(self.body, dict):
             return self.body.get("code")
         return None
+
+    def is_order_not_found(self) -> bool:
+        return self.code == ORDER_NOT_FOUND_CODE
 
     def is_retryable(self) -> bool:
         c = self.code

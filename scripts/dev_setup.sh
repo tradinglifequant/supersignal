@@ -1,28 +1,29 @@
 #!/usr/bin/env bash
-set -e
-echo "Super Signal - Windows/Posix dev setup"
+set -euo pipefail
+echo "Super Signal - Dev environment setup"
 
 if [ ! -f .env ]; then
   cp .env.example .env
-  echo "Created .env from .env.example - edit your keys"
+  echo "Created .env from .env.example - configure ADMIN_PASSWORD_HASH and JWT_SECRET_KEY before login"
 fi
 
-mkdir -p data
+mkdir -p data backend/data
 
-# Backend venv
-if [ ! -d backend/.venv ]; then
-  python -m venv backend/.venv
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || command -v python)}"
+
+if [ ! -d .venv ]; then
+  "$PYTHON_BIN" -m venv .venv
 fi
-source backend/.venv/bin/activate
+# shellcheck disable=SC1091
+source .venv/bin/activate
 pip install -e .
-echo "Installing backend deps done"
+echo "Backend dependencies installed"
 
-# Frontend
 if [ ! -d frontend/node_modules ]; then
-  (cd frontend && npm install)
+  (cd frontend && npm ci)
 fi
 
-echo "Run alembic upgrade head and uvicorn"
-echo "  source backend/.venv/bin/activate && alembic -c backend/alembic.ini upgrade head"
-echo "  uvicorn app.main:app --reload --host 0.0.0.0 --port 8000  (from backend dir)"
-echo "  cd frontend && npm run dev"
+echo "Setup complete. Next steps:"
+echo "  source .venv/bin/activate && (cd backend && alembic upgrade head)"
+echo "  PYTHONPATH=backend uvicorn app.main:app --reload --host 127.0.0.1 --port 8000"
+echo "  (cd frontend && npm run dev)"

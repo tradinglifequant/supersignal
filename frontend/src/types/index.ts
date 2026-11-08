@@ -1,4 +1,13 @@
-export type EngineState = 'STOPPED' | 'STARTING' | 'READY' | 'RUNNING' | 'STOPPING' | 'DEGRADED' | 'HALTED_RISK' | 'EMERGENCY' | 'ERROR'
+export type EngineState =
+  | 'STOPPED'
+  | 'STARTING'
+  | 'READY'
+  | 'RUNNING'
+  | 'STOPPING'
+  | 'DEGRADED'
+  | 'HALTED_RISK'
+  | 'EMERGENCY'
+  | 'ERROR'
 
 export interface HealthResponse {
   status: string
@@ -19,6 +28,7 @@ export interface ConfigResponse {
   daily_loss_limit: string
   max_drawdown_pct: string
   max_aggregate_exposure: string
+  max_consecutive_losses: number
   max_slippage_bps: string
   taker_fee_bps: string
   candidate_ttl_seconds: number

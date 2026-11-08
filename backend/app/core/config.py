@@ -4,18 +4,20 @@ All monetary values use Decimal; secrets never logged.
 """
 from __future__ import annotations
 
-import os
 from decimal import Decimal
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(str(_REPO_ROOT / ".env"), str(_REPO_ROOT / "backend" / ".env"), ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
@@ -65,6 +67,7 @@ class Settings(BaseSettings):
     daily_loss_limit: Decimal = Field(default=Decimal("50"))
     max_drawdown_pct: Decimal = Field(default=Decimal("10"))
     max_aggregate_exposure: Decimal = Field(default=Decimal("1000"))
+    max_consecutive_losses: int = Field(default=5)
     max_slippage_bps: Decimal = Field(default=Decimal("50"))
     taker_fee_bps: Decimal = Field(default=Decimal("4"))
     candidate_ttl_seconds: int = Field(default=30)
@@ -77,7 +80,18 @@ class Settings(BaseSettings):
     # Frontend
     cors_origins: str = Field(default="http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000")
 
-    @field_validator("trigger_percentage", "base_margin", "profit_reinvestment_pct", mode="before")
+    @field_validator(
+        "trigger_percentage",
+        "base_margin",
+        "profit_reinvestment_pct",
+        "max_trade_allocation",
+        "daily_loss_limit",
+        "max_drawdown_pct",
+        "max_aggregate_exposure",
+        "max_slippage_bps",
+        "taker_fee_bps",
+        mode="before",
+    )
     @classmethod
     def _coerce_decimal(cls, v):
         if isinstance(v, Decimal):
@@ -112,6 +126,8 @@ class Settings(BaseSettings):
             missing.append("MAX_TRADE_ALLOCATION must be > 0")
         if self.max_slippage_bps <= Decimal("0"):
             missing.append("MAX_SLIPPAGE_BPS must be > 0")
+        if self.max_consecutive_losses <= 0:
+            missing.append("MAX_CONSECUTIVE_LOSSES must be > 0")
         return (len(missing) == 0, missing)
 
 
