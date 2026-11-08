@@ -52,3 +52,4 @@ htmlcov/
 
 # Build
 *.egg-info/
+frontend/data
