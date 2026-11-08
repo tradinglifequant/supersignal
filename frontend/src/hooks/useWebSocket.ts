@@ -3,57 +3,66 @@ import { wsUrl } from '../services/api'
 
 type WSEvent = { type: string; payload: any; timestamp: string }
 
-export function useWebSocket(onEvent?: (ev: WSEvent) => void) {
+export function useWebSocket(token: string | null, onEvent?: (ev: WSEvent) => void) {
   const [connected, setConnected] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
-  const reconnectAttempts = useRef(0)
+  const onEventRef = useRef(onEvent)
+  onEventRef.current = onEvent
 
-  const connect = useCallback(() => {
-    const url = wsUrl()
-    try {
-      const ws = new WebSocket(url)
+  useEffect(() => {
+    if (!token) {
+      setConnected(false)
+      return
+    }
+    let stopped = false
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined
+    let attempts = 0
+    const connect = () => {
+      if (stopped) return
+      const ws = new WebSocket(wsUrl())
       wsRef.current = ws
       ws.onopen = () => {
-        setConnected(true)
-        reconnectAttempts.current = 0
-        // request snapshot
-        ws.send(JSON.stringify({ type: 'subscribe', payload: { channel: 'all' } }))
+        ws.send(JSON.stringify({ type: 'authenticate', token }))
       }
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data)
-          onEvent?.(data)
-        } catch {}
-      }
-      ws.onclose = () => {
-        setConnected(false)
-        // exponential backoff reconnect
-        if (reconnectAttempts.current < 10) {
-          const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 30000)
-          reconnectAttempts.current += 1
-          setTimeout(connect, delay)
+          if (data.type === 'snapshot') {
+            setConnected(true)
+            attempts = 0
+            ws.send(JSON.stringify({ type: 'subscribe', payload: { channel: 'all' } }))
+          }
+          onEventRef.current?.(data)
+        } catch {
+          console.warn('Invalid WebSocket event')
         }
       }
-      ws.onerror = () => {
-        ws.close()
+      ws.onclose = (event) => {
+        setConnected(false)
+        if (!stopped && event.code !== 4001 && event.code !== 4003 && attempts < 10) {
+          const delay = Math.min(1000 * Math.pow(2, attempts++), 30000)
+          reconnectTimer = setTimeout(connect, delay)
+        }
+        if (!stopped && event.code === 4001) {
+          window.dispatchEvent(new Event('supersignal-session-expired'))
+        }
       }
-    } catch (e) {
-      console.error('WS connect error', e)
+      ws.onerror = () => ws.close()
     }
-  }, [onEvent])
-
-  useEffect(() => {
     connect()
     return () => {
+      stopped = true
+      if (reconnectTimer) clearTimeout(reconnectTimer)
       wsRef.current?.close()
+      wsRef.current = null
     }
-  }, [connect])
+  }, [token])
 
   const send = useCallback((msg: any) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
+    if (connected && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(msg))
     }
-  }, [])
+  }, [connected])
 
   return { connected, send }
 }

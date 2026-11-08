@@ -21,6 +21,7 @@ from app.api.routes.market import router as market_router
 from app.api.routes.trades import router as trades_router
 from app.api.routes.metrics import router as metrics_router
 from app.api.websocket import router as ws_router
+from app.security.auth import get_current_user
 
 settings = get_settings()
 setup_logging(settings.log_level)
@@ -54,7 +55,7 @@ app = FastAPI(
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origin_list + ["*"] if settings.app_env == "development" else settings.cors_origin_list,
+    allow_origins=settings.cors_origin_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -69,11 +70,11 @@ async def global_exception_handler(request, exc):
 # Routers
 app.include_router(health_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
-app.include_router(config_router, prefix="/api")
-app.include_router(engine_router, prefix="/api")
-app.include_router(market_router, prefix="/api")
-app.include_router(trades_router, prefix="/api")
-app.include_router(metrics_router, prefix="/api")
+app.include_router(config_router, prefix="/api", dependencies=[Depends(get_current_user)])
+app.include_router(engine_router, prefix="/api", dependencies=[Depends(get_current_user)])
+app.include_router(market_router, prefix="/api", dependencies=[Depends(get_current_user)])
+app.include_router(trades_router, prefix="/api", dependencies=[Depends(get_current_user)])
+app.include_router(metrics_router, prefix="/api", dependencies=[Depends(get_current_user)])
 app.include_router(ws_router, prefix="/api")
 
 @app.get("/")

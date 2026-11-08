@@ -61,7 +61,7 @@ export const Configuration: React.FC = () => {
               <button onClick={testCred} style={{ padding: '8px 14px', borderRadius: 6, background: '#38bdf8', border: 'none', color: '#0f172a', fontWeight: 700, cursor: 'pointer' }}>Test Credentials</button>
               <button onClick={saveCred} style={{ padding: '8px 14px', borderRadius: 6, background: '#10b981', border: 'none', color: '#fff', fontWeight: 700, cursor: 'pointer' }}>Save Encrypted</button>
             </div>
-            {testResult && <div style={{ padding: 10, borderRadius: 6, background: testResult.valid ? '#065f46' : '#7f1d1d', color: '#fff', fontSize: 12 }}>{testResult.message} {testResult.account_info && <pre style={{ marginTop: 6, background: 'rgba(0,0,0,0.2)', padding: 8, borderRadius: 6, overflow: 'auto' }}>{JSON.stringify(testResult.account_info, null, 2).slice(0, 500)}</pre>}</div>}
+            {testResult && <div style={{ padding: 10, borderRadius: 6, background: testResult.valid ? '#065f46' : '#7f1d1d', color: '#fff', fontSize: 12 }}>{testResult.message}</div>}
             <div style={{ fontSize: 11, color: '#64748b' }}>Credentials are encrypted at rest (Fernet) and never returned via API. Ensure API key has no withdrawal permission & IP allowlist set for production.</div>
           </div>
         </div>

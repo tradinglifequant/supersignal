@@ -7,14 +7,14 @@ from typing import List, Optional
 from app.db.session import get_db
 from app.db.models import SymbolMetadata, SignalCandidate
 from app.schemas import SymbolInfo, SignalCandidateResponse
-from app.security.auth import get_current_user_optional
+from app.security.auth import get_current_user
 from app.engine.service import EngineService
 from app.api.routes.engine import get_engine
 
 router = APIRouter(prefix="/market", tags=["market"])
 
 @router.get("/symbols", response_model=List[SymbolInfo])
-async def list_symbols(db: Session = Depends(get_db), user=Depends(get_current_user_optional)):
+async def list_symbols(db: Session = Depends(get_db), user=Depends(get_current_user)):
     rows = db.query(SymbolMetadata).all()
     result = []
     for r in rows:
@@ -38,7 +38,7 @@ async def list_signals(
     symbol: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
-    user=Depends(get_current_user_optional),
+    user=Depends(get_current_user),
 ):
     q = db.query(SignalCandidate).order_by(SignalCandidate.detected_at.desc())
     if status:
@@ -57,7 +57,7 @@ async def list_signals(
     ]
 
 @router.get("/scanner")
-async def scanner(db: Session = Depends(get_db), engine: EngineService = Depends(get_engine), user=Depends(get_current_user_optional)):
+async def scanner(db: Session = Depends(get_db), engine: EngineService = Depends(get_engine), user=Depends(get_current_user)):
     # Live scanner view: combine symbol metadata + last price + trigger pending
     rows = db.query(SymbolMetadata).filter(SymbolMetadata.is_eligible == True).all()  # noqa: E712
     scanner_data = []

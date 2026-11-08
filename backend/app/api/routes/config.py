@@ -8,7 +8,7 @@ from app.core.config import get_settings
 from app.db.session import get_db
 from app.db.models import AppConfig, AuditEvent
 from app.schemas import ConfigResponse, ConfigUpdateRequest, CredentialTestRequest, CredentialsSaveRequest
-from app.security.auth import get_current_user, get_current_user_optional
+from app.security.auth import get_current_user
 from app.security.encryption import encrypt_value
 from app.exchange.binance_adapter import BinanceAdapter
 import uuid
@@ -41,7 +41,7 @@ def _to_config_response(settings) -> ConfigResponse:
     )
 
 @router.get("", response_model=ConfigResponse)
-async def get_config(user=Depends(get_current_user_optional), db: Session = Depends(get_db)):
+async def get_config(user=Depends(get_current_user), db: Session = Depends(get_db)):
     settings = get_settings()
     # Try DB override
     cfg = db.query(AppConfig).first()
@@ -105,7 +105,7 @@ async def test_credentials(payload: CredentialTestRequest):
     adapter = BinanceAdapter(api_key=payload.api_key, api_secret=payload.api_secret, testnet=payload.testnet)
     try:
         valid, msg, info = await adapter.validate_credentials()
-        return {"valid": valid, "message": msg, "account_info": info}
+        return {"valid": valid, "message": "Credential check succeeded" if valid else "Credential check failed"}
     finally:
         await adapter.close()
 

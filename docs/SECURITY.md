@@ -1,35 +1,13 @@
-# Security Review
+# Security status
 
-## Authentication & Authorization
-- JWT HS256, bcrypt password hashing, bearer scheme; all private routes require auth.
-- `ALLOW_DEV_BYPASS` only in development; production enforces auth even on private network.
-- CORS allowlist from env; cookie CSRF protection stubbed for future cookie sessions.
+This prototype is **not approved for public deployment or real credentials**. Binance entry is locked for both testnet and live; protective/reducing order paths are not verified.
 
-## Credential Handling
-- Binance & ThreeRouter secrets encrypted at rest via Fernet; key stored outside DB (env), versioned.
-- `never` logged or returned via API (masked status only).
-- `.env` excluded from git via .gitignore.
+## Authentication baseline
 
-## API Key Hardening
-- Checklist before LIVE: no withdrawal permission, IP allowlist to production egress, least privilege.
-- Testnet vs Live credentials separated by `environment` field.
+All application data and control HTTP routes require a bearer token, including in development. Health, readiness, login and API documentation are public. Login requires an explicitly configured bcrypt `ADMIN_PASSWORD_HASH` and a unique `JWT_SECRET_KEY` of at least 32 characters. There is no default password or development bypass. Tokens require an expiration and the configured operator subject. The frontend keeps the token only in memory, and authenticates WebSockets using the first message rather than the URL; WebSocket origins must exactly match the configured CORS allowlist and sessions close at token expiration.
 
-## Transport
-- Development: loopback HTTP okay; Production: HTTPS required (Nginx + Let's Encrypt or Aiven TLS).
-- Aiven PG TLS `sslmode=require` enforced.
+Login is limited to 10 attempts per 60 seconds per process, across all clients. This is bounded and protects the single-process local prototype, but it resets on restart, can be exhausted by any client, and does not coordinate across workers. Deployment requires an independently reviewed shared rate limiter, TLS, a secure trusted proxy setup, and server-side session revocation. Browser logout only clears the local token; an issued token remains valid until it expires or the signing key is rotated.
 
-## Input Validation
-- Pydantic schemas at all boundaries; `Decimal` deserialization, tick/min_notional checks.
-- AI provider output treated as untrusted; JSON schema validated, prompt injection not executed.
+## Remaining review
 
-## Risk Controls
-- Hard limits `DAILY_LOSS_LIMIT`, `MAX_DRAWDOWN_PCT`, etc. must be >0 before engine starts; missing → HALTED_RISK.
-- Emergency stop blocks entries immediately, applies flatten policy, audit logged.
-
-## Logging
-- Structured logs with `RedactingFilter` for api_key, secret, password, bearer tokens.
-- SystemLogs & AuditEvents persisted with redacted messages.
-
-## Known Limitations
-- Dashboard is single-operator; multi-tenant not in scope.
-- No WAF/DDOS beyond standard infra; recommend Cloudflare or Aiven firewall for production.
+Credential encryption and logging redaction, endpoint validation, configuration changes and auditing, dependencies, session management, CSP/XSS defenses, and deployment all require a full security review. Account/exchange permissions and Portfolio Margin support have not been verified. See the README and phase roadmap for release blockers. Never treat passing mock tests as evidence of exchange or production readiness.

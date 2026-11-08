@@ -46,7 +46,9 @@ class Settings(BaseSettings):
     threerouter_max_concurrency: int = Field(default=5)
 
     # Security
-    jwt_secret_key: str = Field(default="change-me-jwt-secret-key-32-chars-min")
+    admin_username: str = Field(default="admin")
+    admin_password_hash: str = Field(default="")
+    jwt_secret_key: str = Field(default="")
     jwt_algorithm: str = Field(default="HS256")
     jwt_expire_minutes: int = Field(default=60)
     credentials_encryption_key: str = Field(default="")
@@ -73,7 +75,7 @@ class Settings(BaseSettings):
     require_hard_limits: bool = Field(default=True)
 
     # Frontend
-    cors_origins: str = Field(default="http://localhost:5173,http://localhost:3000")
+    cors_origins: str = Field(default="http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000")
 
     @field_validator("trigger_percentage", "base_margin", "profit_reinvestment_pct", mode="before")
     @classmethod

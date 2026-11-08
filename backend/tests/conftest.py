@@ -1,5 +1,19 @@
 import os
-os.environ.setdefault("ALLOW_DEV_BYPASS", "true")
+import tempfile
+from pathlib import Path
+
+# Never load the operator's database or exchange/provider credentials in tests.
+_test_database = Path(tempfile.mkdtemp(prefix="supersignal-tests-")) / "test.sqlite"
+os.environ["DATABASE_URL"] = f"sqlite:///{_test_database.as_posix()}"
+os.environ["BINANCE_API_KEY"] = ""
+os.environ["BINANCE_API_SECRET"] = ""
+os.environ["THREEROUTER_API_KEY"] = ""
+os.environ["BINANCE_TESTNET"] = "true"
+# Test-only credentials; never use these outside the test suite.
+os.environ["ADMIN_USERNAME"] = "admin"
+os.environ["JWT_SECRET_KEY"] = "test-only-key-not-for-production-000000000000"
+from passlib.hash import bcrypt
+os.environ["ADMIN_PASSWORD_HASH"] = bcrypt.hash("test-password")
 os.environ.setdefault("APP_ENV", "development")
 
 import pytest

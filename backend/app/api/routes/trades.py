@@ -7,12 +7,12 @@ from typing import List, Optional
 from app.db.session import get_db
 from app.db.models import Trade, Order, AgentLog, SystemLog
 from app.schemas import TradeResponse, OrderResponse, AgentLogResponse, SystemLogResponse
-from app.security.auth import get_current_user_optional
+from app.security.auth import get_current_user
 
 router = APIRouter(tags=["trading"])
 
 @router.get("/positions", response_model=List[TradeResponse])
-async def list_positions(status: Optional[str] = Query("OPEN"), db: Session = Depends(get_db), user=Depends(get_current_user_optional)):
+async def list_positions(status: Optional[str] = Query("OPEN"), db: Session = Depends(get_db), user=Depends(get_current_user)):
     # Open positions = OPEN, PROTECTED
     if status == "OPEN":
         q = db.query(Trade).filter(Trade.status.in_(["OPEN", "PROTECTED", "PENDING"])).order_by(Trade.created_at.desc())
@@ -29,7 +29,7 @@ async def list_trades(
     status: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=500),
     db: Session = Depends(get_db),
-    user=Depends(get_current_user_optional),
+    user=Depends(get_current_user),
 ):
     q = db.query(Trade).order_by(Trade.created_at.desc())
     if symbol:
@@ -40,7 +40,7 @@ async def list_trades(
     return [_to_trade_resp(r) for r in rows]
 
 @router.get("/trades/{trade_id}", response_model=TradeResponse)
-async def get_trade(trade_id: str, db: Session = Depends(get_db), user=Depends(get_current_user_optional)):
+async def get_trade(trade_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
     t = db.query(Trade).filter(Trade.id == trade_id).first()
     if not t:
         from fastapi import HTTPException
@@ -48,19 +48,19 @@ async def get_trade(trade_id: str, db: Session = Depends(get_db), user=Depends(g
     return _to_trade_resp(t)
 
 @router.get("/trades/{trade_id}/orders", response_model=List[OrderResponse])
-async def get_orders_for_trade(trade_id: str, db: Session = Depends(get_db), user=Depends(get_current_user_optional)):
+async def get_orders_for_trade(trade_id: str, db: Session = Depends(get_db), user=Depends(get_current_user)):
     rows = db.query(Order).filter(Order.trade_id == trade_id).order_by(Order.submitted_at).all()
     return [_to_order_resp(r) for r in rows]
 
 @router.get("/orders", response_model=List[OrderResponse])
-async def list_orders(symbol: Optional[str] = Query(None), db: Session = Depends(get_db), user=Depends(get_current_user_optional)):
+async def list_orders(symbol: Optional[str] = Query(None), db: Session = Depends(get_db), user=Depends(get_current_user)):
     q = db.query(Order).order_by(Order.submitted_at.desc())
     if symbol:
         q = q.filter(Order.symbol == symbol)
     return [_to_order_resp(r) for r in q.limit(100).all()]
 
 @router.get("/logs", response_model=List[SystemLogResponse])
-async def list_logs(level: Optional[str] = Query(None), limit: int = Query(100, ge=1, le=500), db: Session = Depends(get_db), user=Depends(get_current_user_optional)):
+async def list_logs(level: Optional[str] = Query(None), limit: int = Query(100, ge=1, le=500), db: Session = Depends(get_db), user=Depends(get_current_user)):
     q = db.query(SystemLog).order_by(SystemLog.created_at.desc())
     if level:
         q = q.filter(SystemLog.level == level)
@@ -68,7 +68,7 @@ async def list_logs(level: Optional[str] = Query(None), limit: int = Query(100, 
     return [SystemLogResponse(id=r.id, level=r.level, event_code=r.event_code, message_redacted=r.message_redacted, correlation_id=r.correlation_id, trade_id=r.trade_id, symbol=r.symbol, created_at=r.created_at) for r in rows]
 
 @router.get("/agent-logs", response_model=List[AgentLogResponse])
-async def list_agent_logs(candidate_id: Optional[str] = Query(None), limit: int = Query(100, ge=1, le=500), db: Session = Depends(get_db), user=Depends(get_current_user_optional)):
+async def list_agent_logs(candidate_id: Optional[str] = Query(None), limit: int = Query(100, ge=1, le=500), db: Session = Depends(get_db), user=Depends(get_current_user)):
     q = db.query(AgentLog).order_by(AgentLog.created_at.desc())
     if candidate_id:
         q = q.filter(AgentLog.candidate_id == candidate_id)

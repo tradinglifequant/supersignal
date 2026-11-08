@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import api from './services/api'
+import api, { setAccessToken } from './services/api'
 import { TopBar } from './components/layout/TopBar'
 import { Sidebar } from './components/layout/Sidebar'
 import { EngineControls } from './components/common/EngineControls'
@@ -33,28 +33,38 @@ export default function App() {
     return () => clearInterval(iv)
   }, [])
 
-  const { connected } = useWebSocket((ev) => {
+  const [token, setToken] = useState<string | null>(null)
+  const { connected } = useWebSocket(token, (ev) => {
     setEvents((prev) => [ev, ...prev].slice(0, 20))
   })
 
-  const [token, setToken] = useState<string | null>(localStorage.getItem('supersignal_token'))
-  const [loginForm, setLoginForm] = useState({ username: 'admin', password: 'admin123' })
+  const [loginForm, setLoginForm] = useState({ username: '', password: '' })
   const [loginError, setLoginError] = useState('')
 
   const handleLogin = async () => {
     try {
       const r = await api.post('/api/auth/login', loginForm)
-      localStorage.setItem('supersignal_token', r.data.access_token)
+      setAccessToken(r.data.access_token)
       setToken(r.data.access_token)
+      setLoginForm((form) => ({ ...form, password: '' }))
+      refresh()
       setLoginError('')
     } catch (e: any) {
       setLoginError('Login failed: ' + (e.response?.data?.detail || e.message))
     }
   }
   const handleLogout = () => {
-    localStorage.removeItem('supersignal_token')
+    setAccessToken(null)
     setToken(null)
+    setEngine(null)
+    setEvents([])
   }
+
+  useEffect(() => {
+    const expire = () => { setAccessToken(null); setToken(null); setEngine(null); setEvents([]) }
+    window.addEventListener('supersignal-session-expired', expire)
+    return () => window.removeEventListener('supersignal-session-expired', expire)
+  }, [])
 
   if (!token) {
     return (
@@ -66,7 +76,7 @@ export default function App() {
             <input type="password" value={loginForm.password} onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })} placeholder="Password" style={{ padding: '10px 12px', borderRadius: 6, border: '1px solid #334155', background: '#0f172a', color: '#e2e8f0' }} />
             {loginError && <div style={{ color: '#ef4444', fontSize: 12 }}>{loginError}</div>}
             <button onClick={handleLogin} style={{ padding: '10px 16px', borderRadius: 6, background: '#38bdf8', border: 'none', color: '#0f172a', fontWeight: 700, cursor: 'pointer' }}>Sign In</button>
-            <div style={{ fontSize: 11, color: '#64748b' }}>Default dev credentials: admin / admin123. Change via ADMIN_PASSWORD_HASH env.</div>
+            <div style={{ fontSize: 11, color: '#64748b' }}>Configure operator credentials in the backend before signing in.</div>
           </div>
         </div>
       </div>
