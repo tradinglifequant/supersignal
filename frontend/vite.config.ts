@@ -6,22 +6,17 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5173,
-    strictPort: true,
+    allowedHosts: true,
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: process.env.VITE_API_TARGET || 'http://127.0.0.1:8000',
         changeOrigin: true,
         ws: true,
       },
     },
-    // Allow preview host for Arena
-    cors: true,
-    hmr: {
-      clientPort: 443,
-    },
   },
-  preview: {
-    host: '0.0.0.0',
-    port: 5173,
+  test: {
+    globals: true,
+    environment: 'jsdom',
   },
 })

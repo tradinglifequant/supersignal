@@ -1,11 +1,17 @@
 from collections import deque
 import time
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from starlette.concurrency import run_in_threadpool
 
 from app.schemas import LoginRequest, LoginResponse
-from app.security.auth import verify_password, create_access_token, get_admin_credentials
+from app.security.auth import (
+    create_access_token,
+    get_admin_credentials,
+    get_current_user,
+    revoke_token_payload,
+    verify_password,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -30,3 +36,14 @@ async def login(payload: LoginRequest):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     token = create_access_token({"sub": payload.username})
     return LoginResponse(access_token=token)
+
+
+@router.post("/logout")
+async def logout(user: dict = Depends(get_current_user)):
+    revoke_token_payload(user)
+    return {"status": "logged_out"}
+
+
+@router.get("/me")
+async def me(user: dict = Depends(get_current_user)):
+    return {"username": user["username"], "exp": user.get("exp")}

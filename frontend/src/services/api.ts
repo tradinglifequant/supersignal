@@ -1,10 +1,18 @@
 import axios from 'axios'
 
 // Remove sessions written by older versions, then keep new sessions in memory only.
-localStorage.removeItem('supersignal_token')
+try {
+  localStorage.removeItem('supersignal_token')
+} catch {
+  // Ignore unavailable storage in restricted test/browser contexts
+}
+
 // A reload requires signing in again.
 let accessToken: string | null = null
-export const setAccessToken = (token: string | null) => { accessToken = token }
+export const setAccessToken = (token: string | null) => {
+  accessToken = token
+}
+export const getAccessToken = () => accessToken
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || '',
@@ -20,8 +28,11 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     // An old anonymous or previous-session request must not clear a newer login.
-    if (error.response?.status === 401 && accessToken &&
-        error.config?.headers?.Authorization === `Bearer ${accessToken}`) {
+    if (
+      error.response?.status === 401 &&
+      accessToken &&
+      error.config?.headers?.Authorization === `Bearer ${accessToken}`
+    ) {
       accessToken = null
       window.dispatchEvent(new Event('supersignal-session-expired'))
     }
