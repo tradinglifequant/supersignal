@@ -4,14 +4,18 @@ Super Signal is an **experimental prototype** of an AI-assisted Binance USDⓈ-M
 
 ## Safety and current status
 
-**Not ready for testnet order execution, live trading, or public deployment.** The real Binance adapter blocks all exposure-increasing orders, and the engine refuses to start with that adapter in both testnet and live modes. There is deliberately no configuration switch to unlock entries. The in-memory mock adapter is available for local development and automated tests; it is not a faithful exchange simulator.
+**The code path to real-money execution now exists, but it has never been exercised against a real exchange account. Do not run it with real funds until the verification in `docs/LIVE_TRADING.md` is complete.**
 
-The adapter still permits requests marked reduce-only or close-position so existing exposure is not intentionally stranded by the entry lock. This is **not** a guarantee that protection, emergency closure, or exchange compatibility works: those paths remain unverified against real exchange accounts. Manage any real positions directly on the exchange.
+Order placement is controlled by an evaluated trading gate (`app/trading/gate.py`), not a hard block. It defaults to `TRADING_ENV=none`, in which case no exposure-increasing order can be placed. Reaching live trading requires four independent switches to agree — `TRADING_ENV=live`, `LIVE_TRADING_OPT_IN=true`, `LIVE_TRADING_ACKNOWLEDGEMENT` set to the exact required phrase, and `KILL_SWITCH` unset — plus a preflight that verifies the key can trade, **cannot withdraw**, that clock drift is within tolerance, that every risk limit is configured, and that the required testnet soak has elapsed. `GET /api/engine/preflight` reports each check and names what is blocking.
+
+Requests marked reduce-only or close-position bypass the gate on purpose: being unable to close a position is strictly worse than being unable to open one. That is **not** a guarantee that protection, emergency closure, or exchange compatibility works — those paths remain unverified against real exchange accounts. Manage any real positions directly on the exchange.
+
+Read [`docs/LIVE_TRADING.md`](docs/LIVE_TRADING.md) for the staged runbook before changing any of these settings.
 
 Important outstanding blockers include:
 
-- Real account mode, Portfolio Margin risk/headroom, conditional order contracts, and protective order behavior have not been verified against Binance.
-- ThreeRouter's actual API contract and external footprint/order-flow market-data feeds remain unverified; when `THREEROUTER_API_KEY` is unset or unavailable, the AI pipeline fails closed (`NO`) and records explicit error traces.
+- **No Binance endpoint has been verified against a real or testnet account** from this environment — there is no network path to Binance here. Portfolio Margin routing (`/papi/v1/um/*`), maintenance-margin interaction, position-side mode, per-symbol leverage, conditional orders and protective-order behaviour are all implemented against the published API but unexercised.
+- ThreeRouter's actual API contract and external footprint/order-flow feeds remain unverified. With `AI_GATE_MODE=threerouter` and no `THREEROUTER_API_KEY`, the pipeline fails closed (`NO`). `AI_GATE_MODE=deterministic` uses the auditable local rule engine in `app/ai/deterministic_gate.py` instead.
 - Authentication and deployment still need a full external security review, including distributed rate limiting and multi-worker/persistent session revocation. Never expose this prototype to an untrusted network or use real credentials.
 - Phase exit gates in `phases.md` are goals, not evidence of completion. No testnet or live exchange validation is claimed.
 
@@ -29,10 +33,14 @@ pip install --upgrade pip setuptools wheel
 pip install -r backend/requirements.txt
 # Copy .env.example to .env (or backend/.env), then configure ADMIN_USERNAME,
 # ADMIN_PASSWORD_HASH, and a unique JWT_SECRET_KEY (see below).
-cd backend
-alembic upgrade head
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+alembic -c backend/alembic.ini upgrade head
+PYTHONPATH=backend uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
+
+Relative `sqlite:///` URLs in `DATABASE_URL` are anchored to the repository root, and
+`backend/alembic.ini` resolves its script directory from its own location, so migrations
+and the API server use the same database whether you start them from the repository root
+or from `backend/`.
 
 ### Configure the local operator
 

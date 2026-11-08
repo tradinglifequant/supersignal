@@ -11,7 +11,15 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
-from app.db.models import AppConfig, Order, SignalCandidate, Trade, ensure_utc
+from app.db.models import (
+    ACTIVE_TRADE_STATUSES,
+    SETTLED_TRADE_STATUSES,
+    AppConfig,
+    Order,
+    SignalCandidate,
+    Trade,
+    ensure_utc,
+)
 from app.exchange.binance_adapter import BinanceAPIError
 from app.exchange.interface import ExchangeAdapter
 from app.exchange.mock_adapter import OrderNotFoundError
@@ -72,7 +80,7 @@ class ExecutionEngine:
         # Check local DB for existing active position on symbol
         local_active = (
             self.db.query(Trade)
-            .filter(Trade.status.in_(["OPEN", "PROTECTED", "PENDING", "CLOSING"]))
+            .filter(Trade.status.in_(ACTIVE_TRADE_STATUSES))
             .all()
         )
         if any(t.symbol == symbol for t in local_active):
@@ -479,7 +487,7 @@ class ExecutionEngine:
             positions = await self.adapter.get_positions()
             pos = next((p for p in positions if p.symbol == trade.symbol), None)
             if not pos or pos.position_amt == Decimal("0"):
-                if trade.status not in ("CLOSED", "EMERGENCY_CLOSED", "FAILED"):
+                if trade.status not in (*SETTLED_TRADE_STATUSES, "FAILED"):
                     trade.status = "CLOSED"
                     trade.close_reason = trade.close_reason or "exchange_closed"
                     trade.closed_at = datetime.now(timezone.utc)

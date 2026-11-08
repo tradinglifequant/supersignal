@@ -1,15 +1,17 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import api from '../services/api'
-import { Metrics, EngineStatus } from '../types'
+import { Metrics, EngineStatus, PreflightReport } from '../types'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
 
 export const Overview: React.FC<{ engine: EngineStatus | null }> = ({ engine }) => {
   const [metrics, setMetrics] = useState<Metrics | null>(null)
   const [equity, setEquity] = useState<any[]>([])
+  const [preflight, setPreflight] = useState<PreflightReport | null>(null)
 
   const load = useCallback(() => {
     api.get('/api/metrics').then((r) => setMetrics(r.data)).catch(() => {})
     api.get('/api/metrics/equity-curve').then((r) => setEquity(r.data)).catch(() => {})
+    api.get('/api/engine/preflight').then((r) => setPreflight(r.data)).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -39,9 +41,57 @@ export const Overview: React.FC<{ engine: EngineStatus | null }> = ({ engine }) 
   const unprotectedPositions = engine?.unprotected_positions ?? 0
   const protectedPositions = Math.max(0, openPositions - unprotectedPositions)
 
+  const env = engine?.trading_env ?? 'none'
+  const gateColor = env === 'live' ? '#ef4444' : env === 'testnet' ? '#f59e0b' : '#64748b'
+
   return (
     <div style={{ padding: 20, background: '#0f172a', minHeight: '100%' }}>
       <h2 style={{ color: '#e2e8f0', marginBottom: 12 }}>Overview</h2>
+
+      {/* Execution gate: makes "why is nothing trading" visible instead of implicit */}
+      <div
+        style={{
+          background: '#1e293b',
+          border: `1px solid ${gateColor}`,
+          borderRadius: 10,
+          padding: 16,
+          marginBottom: 20,
+        }}
+      >
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'center' }}>
+          <div style={{ fontSize: 13, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+            Execution Gate
+          </div>
+          <span style={{ color: gateColor, fontWeight: 600, fontSize: 14 }}>
+            {env === 'live' ? 'LIVE — real money' : env === 'testnet' ? 'TESTNET' : 'DISABLED (no orders)'}
+          </span>
+          <span style={{ color: '#94a3b8', fontSize: 13 }}>
+            AI gate: <strong style={{ color: '#e2e8f0' }}>{engine?.ai_gate_mode ?? 'threerouter'}</strong>
+          </span>
+          <span style={{ color: '#94a3b8', fontSize: 13 }}>
+            Portfolio Margin:{' '}
+            <strong style={{ color: '#e2e8f0' }}>{engine?.portfolio_margin ? 'yes' : 'no'}</strong>
+          </span>
+          <span style={{ color: '#94a3b8', fontSize: 13 }}>
+            Live armed:{' '}
+            <strong style={{ color: engine?.live_armed ? '#ef4444' : '#e2e8f0' }}>
+              {engine?.live_armed ? 'YES' : 'no'}
+            </strong>
+          </span>
+        </div>
+        {(preflight?.blocking?.length ?? 0) > 0 && (
+          <ul style={{ margin: '12px 0 0', paddingLeft: 18, color: '#fbbf24', fontSize: 13 }}>
+            {preflight!.blocking.map((b) => (
+              <li key={b}>{b}</li>
+            ))}
+          </ul>
+        )}
+        {preflight?.passed && env === 'none' && (
+          <div style={{ marginTop: 12, color: '#94a3b8', fontSize: 13 }}>
+            Account checks pass, but <code>TRADING_ENV=none</code> so no order can be placed.
+          </div>
+        )}
+      </div>
 
       {/* KPI Cards */}
       <div

@@ -4,11 +4,19 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.models import AppConfig, EquitySnapshot, Trade, ensure_utc
+from app.db.models import (
+    ACTIVE_TRADE_STATUSES,
+    SETTLED_TRADE_STATUSES,
+    AppConfig,
+    EquitySnapshot,
+    Trade,
+    ensure_utc,
+    net_realized_pnl,
+)
 from app.db.session import get_db
 from app.schemas import MetricsResponse
 from app.security.auth import get_current_user
@@ -19,21 +27,12 @@ router = APIRouter(prefix="/metrics", tags=["metrics"])
 @router.get("", response_model=MetricsResponse)
 async def get_metrics(db: Session = Depends(get_db), user=Depends(get_current_user)):
     trades = db.query(Trade).all()
-    closed = [t for t in trades if t.status in ("CLOSED", "EMERGENCY_CLOSED") and t.realized_pnl is not None]
-    open_pos = [t for t in trades if t.status in ("OPEN", "PROTECTED", "PENDING")]
+    closed = [t for t in trades if t.status in SETTLED_TRADE_STATUSES and t.realized_pnl is not None]
+    open_pos = [t for t in trades if t.status in ACTIVE_TRADE_STATUSES]
 
-    realized_pnl = sum(
-        ((t.realized_pnl - (t.fees or Decimal("0")) - (t.funding or Decimal("0"))) for t in closed),
-        Decimal("0"),
-    )
-    winning = [
-        t for t in closed
-        if (t.realized_pnl - (t.fees or Decimal("0")) - (t.funding or Decimal("0"))) > Decimal("0")
-    ]
-    losing = [
-        t for t in closed
-        if (t.realized_pnl - (t.fees or Decimal("0")) - (t.funding or Decimal("0"))) <= Decimal("0")
-    ]
+    realized_pnl = sum((net_realized_pnl(t) for t in closed), Decimal("0"))
+    winning = [t for t in closed if net_realized_pnl(t) > Decimal("0")]
+    losing = [t for t in closed if net_realized_pnl(t) <= Decimal("0")]
 
     total = len(closed)
     win_rate = (Decimal(len(winning)) / Decimal(total) * Decimal("100")) if total else Decimal("0")
@@ -60,7 +59,7 @@ async def get_metrics(db: Session = Depends(get_db), user=Depends(get_current_us
     for t in closed:
         closed_dt = ensure_utc(t.closed_at)
         if closed_dt and closed_dt.date() == today and t.realized_pnl is not None:
-            daily_pnl += t.realized_pnl - (t.fees or Decimal("0")) - (t.funding or Decimal("0"))
+            daily_pnl += net_realized_pnl(t)
 
     cfg = db.query(AppConfig).first()
     settings = get_settings()
@@ -83,8 +82,21 @@ async def get_metrics(db: Session = Depends(get_db), user=Depends(get_current_us
 
 
 @router.get("/equity-curve")
-async def equity_curve(db: Session = Depends(get_db), limit: int = 100, user=Depends(get_current_user)):
-    snapshots = db.query(EquitySnapshot).order_by(EquitySnapshot.captured_at.asc()).limit(limit).all()
+async def equity_curve(
+    db: Session = Depends(get_db),
+    limit: int = Query(100, ge=1, le=2000),
+    user=Depends(get_current_user),
+):
+    # Take the MOST RECENT `limit` snapshots, then return them oldest-first so the
+    # chart shows the current tail of the curve. Ordering ascending before LIMIT
+    # froze the chart on the first `limit` snapshots forever.
+    snapshots = (
+        db.query(EquitySnapshot)
+        .order_by(EquitySnapshot.captured_at.desc())
+        .limit(limit)
+        .all()
+    )
+    snapshots.reverse()
     return [
         {
             "captured_at": s.captured_at.isoformat(),
@@ -98,13 +110,19 @@ async def equity_curve(db: Session = Depends(get_db), limit: int = 100, user=Dep
 
 @router.get("/performance")
 async def performance_by_symbol(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    trades = db.query(Trade).filter(Trade.status.in_(["CLOSED", "EMERGENCY_CLOSED"])).all()
+    trades = db.query(Trade).filter(Trade.status.in_(SETTLED_TRADE_STATUSES)).all()
     by_symbol = defaultdict(list)
     for t in trades:
         by_symbol[t.symbol].append(t)
     result = {}
     for sym, lst in by_symbol.items():
-        pnl = sum((t.realized_pnl for t in lst if t.realized_pnl), Decimal("0"))
-        wins = len([t for t in lst if t.realized_pnl and t.realized_pnl > 0])
-        result[sym] = {"trades": len(lst), "pnl": str(pnl), "wins": wins, "losses": len(lst) - wins}
+        # Net of fees and funding, matching /api/metrics win/loss accounting.
+        pnls = [net_realized_pnl(t) for t in lst if t.realized_pnl is not None]
+        wins = len([p for p in pnls if p > Decimal("0")])
+        result[sym] = {
+            "trades": len(lst),
+            "pnl": str(sum(pnls, Decimal("0"))),
+            "wins": wins,
+            "losses": len(pnls) - wins,
+        }
     return result

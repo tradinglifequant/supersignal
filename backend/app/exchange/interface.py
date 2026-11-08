@@ -174,3 +174,40 @@ class ExchangeAdapter(ABC):
     @abstractmethod
     async def validate_credentials(self) -> tuple[bool, str, dict | None]:
         ...
+
+    # ------------------------------------------------------------------
+    # Market-context feeds.
+    #
+    # These are non-abstract on purpose: they were previously missing entirely,
+    # which meant every snapshot shipped with candles/funding/OI/depth flagged
+    # as missing and the AI gate was deciding on price alone. Implementations
+    # return None on failure rather than raising, so a degraded feed never
+    # aborts a candidate - it is recorded in ``missing_data`` instead.
+    # ------------------------------------------------------------------
+
+    async def get_klines(self, symbol: str, interval: str = "1m", limit: int = 60) -> list[dict] | None:
+        return None
+
+    async def get_depth(self, symbol: str, limit: int = 20) -> dict | None:
+        return None
+
+    async def get_funding_rate(self, symbol: str) -> dict | None:
+        return None
+
+    async def get_open_interest(self, symbol: str) -> dict | None:
+        return None
+
+    async def get_ticker_24h(self, symbol: str) -> dict | None:
+        return None
+
+    async def get_server_time(self) -> int | None:
+        """Exchange clock in ms, for signature-timestamp drift checks."""
+        return None
+
+    async def get_api_key_permissions(self) -> dict | None:
+        """
+        What the configured API key is allowed to do. Derived from an authenticated
+        account read; used by the preflight to refuse a key that can withdraw.
+        Returns None when it cannot be determined.
+        """
+        return None

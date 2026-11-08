@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 import httpx
 from pydantic import ValidationError
 
+from app.ai.deterministic_gate import DeterministicGate
 from app.ai.schemas import Agent6ResponseSchema, AgentRequest, AgentResponse, MarketSnapshot
 from app.core.config import get_settings
 
@@ -29,12 +30,21 @@ class ThreeRouterClient:
         self.base_url = (base_url or settings.threerouter_base_url).rstrip("/")
         self.timeout = timeout or settings.threerouter_timeout_seconds
         self.max_concurrency = settings.threerouter_max_concurrency
+        self._missing_key_logged = False
         self._semaphore = asyncio.Semaphore(self.max_concurrency)
         self.client = httpx.AsyncClient(timeout=self.timeout + 5)
 
+    class MissingKeyError(ValueError):
+        """
+        THREEROUTER_API_KEY is unset. A configuration state, not an agent fault.
+        Subclasses ValueError on purpose: the handler in call_agent catches
+        (JSONDecodeError, ValidationError, ValueError), and a RuntimeError would
+        escape it and surface unhandled instead of failing closed.
+        """
+
     async def _post(self, path: str, payload: dict) -> dict:
         if not self.api_key:
-            raise ValueError("ThreeRouter API key not configured")
+            raise ThreeRouterClient.MissingKeyError("ThreeRouter API key not configured")
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "X-API-Key": self.api_key,
@@ -96,7 +106,16 @@ class ThreeRouterClient:
                 logger.warning("Agent %s timeout", agent_name)
                 raise
             except (json.JSONDecodeError, ValidationError, ValueError) as e:
-                logger.error("Agent %s invalid response: %s", agent_name, e)
+                if isinstance(e, ThreeRouterClient.MissingKeyError):
+                    # One warning per process, not five ERRORs per candidate.
+                    if not self._missing_key_logged:
+                        self._missing_key_logged = True
+                        logger.warning(
+                            "THREEROUTER_API_KEY is not configured; the LLM gate will "
+                            "fail closed. Set it, or set AI_GATE_MODE=deterministic."
+                        )
+                else:
+                    logger.error("Agent %s invalid response: %s", agent_name, e)
                 raise ValueError(f"Invalid agent response: {e}") from e
 
     def _extract_content(self, raw: dict) -> str:
@@ -145,6 +164,8 @@ class AIOrchestrator:
     def __init__(self, client: ThreeRouterClient | None = None):
         self.client = client or ThreeRouterClient()
         self.settings = get_settings()
+        self.deterministic = DeterministicGate(self.settings)
+        self._missing_key_warned = False
 
     async def run_agents_1_to_5(self, snapshot: MarketSnapshot) -> Dict[str, Any]:
         agents = ["agent-1", "agent-2", "agent-3", "agent-4", "agent-5"]
@@ -278,7 +299,42 @@ class AIOrchestrator:
             aggregated_from=list(prior_results.keys()),
         )
 
+    def _deterministic_pipeline(
+        self, snapshot: MarketSnapshot
+    ) -> tuple[Dict[str, Any], Agent6ResponseSchema]:
+        """Offline rule-engine path. Same shapes as the LLM path, so logs persist identically."""
+        agents = self.deterministic.evaluate(snapshot)
+        prior = {
+            name: {"status": "success", "response": resp, "latency_ms": 0}
+            for name, resp in agents.items()
+        }
+        final = self.deterministic.aggregate(snapshot, agents)
+        logger.info(
+            "Deterministic gate %s for %s %s: %s",
+            final.decision, snapshot.symbol, snapshot.direction, final.rationale,
+        )
+        return prior, final
+
     async def run_full_pipeline(self, snapshot: MarketSnapshot) -> tuple[Dict[str, Any], Agent6ResponseSchema]:
+        mode = self.settings.ai_gate_mode
+        if mode == "deterministic":
+            return self._deterministic_pipeline(snapshot)
+        if mode == "reject_all":
+            now = datetime.now(timezone.utc)
+            return (
+                {},
+                Agent6ResponseSchema(
+                    agent_name="agent-6",
+                    schema_version="1.0",
+                    symbol=snapshot.symbol,
+                    direction=snapshot.direction,
+                    decision="NO",
+                    confidence=0.0,
+                    rationale="AI_GATE_MODE=reject_all: the gate is configured to approve nothing",
+                    created_at=now,
+                    aggregated_from=[],
+                ),
+            )
         prior = await self.run_agents_1_to_5(snapshot)
         final = await self.run_agent_6(snapshot, prior)
         return prior, final

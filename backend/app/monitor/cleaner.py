@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from sqlalchemy.orm import Session
 
-from app.db.models import Order, Trade
+from app.db.models import SETTLED_TRADE_STATUSES, Order, Trade
 from app.exchange.interface import ExchangeAdapter
 from app.execution.execution_engine import generate_client_order_id
 
@@ -75,7 +75,7 @@ class OrderCleaner:
     async def cleanup_orphaned(self, symbol: str) -> dict:
         closed_trades = (
             self.db.query(Trade)
-            .filter(Trade.symbol == symbol, Trade.status.in_(["CLOSED", "EMERGENCY_CLOSED"]))
+            .filter(Trade.symbol == symbol, Trade.status.in_(SETTLED_TRADE_STATUSES))
             .all()
         )
         closed_ids = {t.id for t in closed_trades}

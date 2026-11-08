@@ -24,6 +24,7 @@ if [ ! -d frontend/node_modules ]; then
 fi
 
 echo "Setup complete. Next steps:"
-echo "  source .venv/bin/activate && (cd backend && alembic upgrade head)"
+echo "  source .venv/bin/activate"
+echo "  alembic -c backend/alembic.ini upgrade head"
 echo "  PYTHONPATH=backend uvicorn app.main:app --reload --host 127.0.0.1 --port 8000"
 echo "  (cd frontend && npm run dev)"

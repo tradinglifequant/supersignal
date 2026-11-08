@@ -37,6 +37,26 @@ def uuid_str() -> str:
     return str(uuid.uuid4())
 
 
+# Trade statuses that represent live or in-flight exposure.
+#
+# Every place that asks "how many positions are open?" must use this one tuple.
+# Previously the concurrency gate, the engine status endpoint, the position
+# monitor, the duplicate-entry guard and the /api/positions endpoint each kept
+# their own list, so a PENDING or CLOSING trade could occupy exposure while being
+# invisible to the operator and to the status endpoint.
+ACTIVE_TRADE_STATUSES: tuple[str, ...] = ("PENDING", "OPEN", "PROTECTED", "CLOSING")
+
+# Terminal statuses whose realized P&L counts toward daily loss / win-rate maths.
+SETTLED_TRADE_STATUSES: tuple[str, ...] = ("CLOSED", "EMERGENCY_CLOSED")
+
+
+def net_realized_pnl(trade: "Trade") -> Decimal:
+    """Realized P&L after fees and funding. Single source of truth for win/loss maths."""
+    if trade.realized_pnl is None:
+        return Decimal("0")
+    return trade.realized_pnl - (trade.fees or Decimal("0")) - (trade.funding or Decimal("0"))
+
+
 class UTCDateTime(TypeDecorator):
     """Ensures timezone-aware UTC datetimes round-trip consistently on both SQLite and PostgreSQL."""
 

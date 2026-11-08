@@ -23,7 +23,7 @@ export const History: React.FC = () => {
   const exportCsv = () => {
     const esc = (v: string) => `"${v.replace(/"/g, '""')}"`
     const rows = [
-      ['id', 'symbol', 'direction', 'entry', 'exit', 'pnl', 'status', 'created_at'],
+      ['id', 'symbol', 'direction', 'entry', 'exit', 'pnl', 'fees', 'funding', 'status', 'created_at'],
       ...trades.map((t) => [
         t.id,
         t.symbol,
@@ -31,6 +31,8 @@ export const History: React.FC = () => {
         t.entry_price || '',
         t.exit_price || '',
         t.realized_pnl || '',
+        t.fees || '',
+        t.funding || '',
         t.status,
         t.created_at,
       ]),
@@ -76,6 +78,8 @@ export const History: React.FC = () => {
           <option value="CLOSED">CLOSED</option>
           <option value="PROTECTED">PROTECTED</option>
           <option value="OPEN">OPEN</option>
+          <option value="PENDING">PENDING</option>
+          <option value="CLOSING">CLOSING</option>
           <option value="EMERGENCY_CLOSED">EMERGENCY_CLOSED</option>
           <option value="FAILED">FAILED</option>
         </select>

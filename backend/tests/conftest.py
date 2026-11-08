@@ -11,6 +11,16 @@ os.environ["THREEROUTER_API_KEY"] = ""
 os.environ["BINANCE_TESTNET"] = "true"
 os.environ["CORS_ORIGINS"] = "http://localhost:5173,http://127.0.0.1:5173"
 os.environ["CREDENTIALS_ENCRYPTION_KEY"] = ""
+# Pin the execution gate too. Without these the suite inherits whatever the
+# operator's .env says, so a developer running AI_GATE_MODE=deterministic would
+# get a green suite that never exercised the LLM fail-closed path at all.
+os.environ["AI_GATE_MODE"] = "threerouter"
+os.environ["TRADING_ENV"] = "none"
+os.environ["PORTFOLIO_MARGIN"] = "false"
+os.environ["KILL_SWITCH"] = "false"
+os.environ["LIVE_TRADING_OPT_IN"] = "false"
+os.environ["LIVE_TRADING_ACKNOWLEDGEMENT"] = ""
+os.environ["REQUIRE_TESTNET_SOAK_HOURS"] = "0"
 # Test-only credentials; never use these outside the test suite.
 os.environ["ADMIN_USERNAME"] = "admin"
 os.environ["JWT_SECRET_KEY"] = "test-only-key-not-for-production-000000000000"

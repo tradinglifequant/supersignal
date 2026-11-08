@@ -10,7 +10,7 @@ from typing import Set
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from app.core.config import get_settings
-from app.security.auth import decode_token, is_jti_revoked
+from app.security.auth import AuthFailure, is_jti_revoked, verify_token
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -42,7 +42,11 @@ manager = ConnectionManager()
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     # Browser clients must have an explicitly allowed Origin. No wildcard.
-    if websocket.headers.get("origin") not in get_settings().cors_origin_list:
+    origin = websocket.headers.get("origin")
+    if origin not in get_settings().cors_origin_list:
+        # Logged because a reverse proxy that rewrites Origin produces a silent
+        # 4003 that is otherwise indistinguishable from a rejected token.
+        logger.warning("WebSocket rejected: origin %r not in CORS_ORIGINS", origin)
         await websocket.close(code=4003)
         return
     await websocket.accept()
@@ -53,13 +57,19 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         if not isinstance(message, dict) or message.get("type") != "authenticate" or not isinstance(message.get("token"), str):
             await websocket.close(code=4001)
             return
-        payload = decode_token(message["token"])
+        payload = verify_token(message["token"])
         jti = payload.get("jti")
         expires_at = int(payload["exp"])
         if expires_at <= time.time():
+            logger.warning("WebSocket auth rejected: token_expired")
             await websocket.close(code=4001)
             return
+    except AuthFailure as exc:
+        logger.warning("WebSocket auth rejected: %s", exc.reason)
+        await websocket.close(code=4001)
+        return
     except (HTTPException, ValueError, TypeError, KeyError, asyncio.TimeoutError, json.JSONDecodeError):
+        logger.warning("WebSocket auth rejected: malformed or missing first frame")
         await websocket.close(code=4001)
         return
     except WebSocketDisconnect:

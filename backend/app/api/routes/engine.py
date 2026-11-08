@@ -6,9 +6,8 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.session import get_db, get_sync_session_factory
 from app.engine.service import EngineService
-from app.exchange.binance_adapter import BinanceAdapter
-from app.exchange.mock_adapter import MockBinanceAdapter
-from app.schemas import EngineActionRequest, EngineStatusResponse
+from app.exchange.factory import build_adapter
+from app.schemas import EngineActionRequest, EngineStatusResponse, PreflightResponse
 from app.security.auth import get_current_user
 
 router = APIRouter(prefix="/engine", tags=["engine"])
@@ -19,11 +18,9 @@ _engine_instance: EngineService | None = None
 def get_engine(db: Session = Depends(get_db)) -> EngineService:
     global _engine_instance
     if _engine_instance is None:
-        settings = get_settings()
-        if settings.binance_api_key and settings.binance_api_secret:
-            adapter = BinanceAdapter()
-        else:
-            adapter = MockBinanceAdapter()
+        # build_adapter always attaches a trading gate; an adapter without one
+        # would refuse every entry.
+        adapter, _gate = build_adapter()
         _engine_instance = EngineService(db, adapter, session_factory=get_sync_session_factory())
     else:
         _engine_instance.db = db
@@ -57,6 +54,52 @@ async def engine_status(
         symbol_coverage=s.get("symbol_coverage", 0),
         open_positions=s.get("open_positions", 0),
         unprotected_positions=s.get("unprotected_positions", 0),
+        trading_env=s.get("trading_env", settings.trading_env),
+        ai_gate_mode=s.get("ai_gate_mode", settings.ai_gate_mode),
+        portfolio_margin=s.get("portfolio_margin", settings.portfolio_margin),
+        live_armed=s.get("live_armed", settings.live_armed),
+    )
+
+
+@router.get("/preflight", response_model=PreflightResponse)
+async def engine_preflight(
+    refresh: bool = False,
+    user=Depends(get_current_user),
+    engine: EngineService = Depends(get_engine),
+):
+    """
+    Report exactly what the execution gate checked and what is still blocking it.
+
+    This is the endpoint to read before enabling real money: it names the
+    blocking conditions instead of leaving them implicit in a 4xx from the
+    exchange.
+    """
+    settings = get_settings()
+    gate = engine.gate
+    if gate is None:
+        return PreflightResponse(
+            passed=False,
+            blocking=["no trading gate attached to the exchange adapter"],
+            trading_env=settings.trading_env,
+            live_armed=settings.live_armed,
+            kill_switch=settings.kill_switch,
+            ai_gate_mode=settings.ai_gate_mode,
+        )
+    report = await gate.preflight(force=refresh)
+    checks = dict(report["checks"])
+    # Never echo key material; permissions only.
+    checks.pop("api_key_permissions", None)
+    perms = report["checks"].get("api_key_permissions") or {}
+    checks["api_key_can_trade"] = perms.get("can_trade")
+    checks["api_key_can_withdraw"] = perms.get("can_withdraw")
+    return PreflightResponse(
+        passed=report["passed"],
+        blocking=report["blocking"],
+        trading_env=settings.trading_env,
+        live_armed=settings.live_armed,
+        kill_switch=settings.kill_switch,
+        ai_gate_mode=settings.ai_gate_mode,
+        checks=checks,
     )
 
 
