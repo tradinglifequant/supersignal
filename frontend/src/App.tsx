@@ -53,17 +53,27 @@ export default function App() {
 
   const [loginForm, setLoginForm] = useState({ username: '', password: '' })
   const [loginError, setLoginError] = useState('')
+  const [sessionNotice, setSessionNotice] = useState('')
+  const [busy, setBusy] = useState(false)
 
   const handleLogin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault()
+    setBusy(true)
+    setLoginError('')
     try {
       const r = await api.post('/api/auth/login', loginForm)
+      if (!r.data?.access_token) {
+        setLoginError('Login succeeded but no access token was returned.')
+        return
+      }
+      setSessionNotice('')
       setAccessToken(r.data.access_token)
       setToken(r.data.access_token)
       setLoginForm((form) => ({ ...form, password: '' }))
-      setLoginError('')
     } catch (err: any) {
       setLoginError('Login failed: ' + (err.response?.data?.detail || err.message))
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -81,12 +91,28 @@ export default function App() {
   }
 
   useEffect(() => {
-    const expire = () => {
+    const expire = (event: Event) => {
       setAccessToken(null)
       setToken(null)
       setEngine(null)
       setConfig(null)
       setEvents([])
+      // The api interceptor diagnoses the rejection while the token is still in
+      // hand and hands the result over on the event, so a proxy that drops the
+      // auth header is visible instead of looking like a wrong password.
+      const d = (event as CustomEvent).detail
+      if (d && d.token_verifies === false) {
+        setSessionNotice(
+          `Session rejected by the server (${d.failure_reason || 'unknown reason'}). ` +
+            `Authorization header reached the server: ${d.authorization_header_present ? 'yes' : 'no'}. ` +
+            `X-Access-Token reached the server: ${d.x_access_token_present ? 'yes' : 'no'}. ` +
+            (d.authorization_header_present || d.x_access_token_present
+              ? 'The token itself was rejected.'
+              : 'Neither token header reached the server, so a proxy in front of the app is stripping it.')
+        )
+      } else {
+        setSessionNotice('Your session ended. Please sign in again.')
+      }
     }
     window.addEventListener('supersignal-session-expired', expire)
     return () => window.removeEventListener('supersignal-session-expired', expire)
@@ -114,6 +140,22 @@ export default function App() {
           }}
         >
           <h2 style={{ color: '#e2e8f0', marginTop: 0 }}>Sign in to Super Signal 🎯</h2>
+          {sessionNotice && (
+            <div
+              role="alert"
+              style={{
+                background: '#7f1d1d',
+                border: '1px solid #ef4444',
+                color: '#fecaca',
+                borderRadius: 6,
+                padding: '8px 10px',
+                fontSize: 12,
+                marginBottom: 12,
+              }}
+            >
+              {sessionNotice}
+            </div>
+          )}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <input
               aria-label="Username"
@@ -147,6 +189,7 @@ export default function App() {
             {loginError && <div style={{ color: '#ef4444', fontSize: 12 }}>{loginError}</div>}
             <button
               type="submit"
+              disabled={busy}
               style={{
                 padding: '10px 16px',
                 borderRadius: 6,

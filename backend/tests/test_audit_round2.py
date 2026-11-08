@@ -453,3 +453,115 @@ def test_terminal_and_halted_states_are_preserved_on_restart(tmp_path, persisted
 
     assert EngineStateMachine(session, _get_settings()).state == persisted
     session.close()
+
+
+# --------------------------------------------------------------------------
+# Dashboard auth: token must survive a proxy that drops `Authorization`
+# --------------------------------------------------------------------------
+
+PRIVATE_ROUTES = [
+    "/api/config",
+    "/api/engine/status",
+    "/api/metrics",
+    "/api/metrics/equity-curve",
+    "/api/metrics/performance",
+    "/api/market/symbols",
+    "/api/market/scanner",
+    "/api/signals",
+    "/api/positions",
+    "/api/trades",
+    "/api/orders",
+    "/api/logs",
+    "/api/audit-logs",
+    "/api/agent-logs",
+]
+
+
+@pytest.fixture
+def auth_token():
+    """One token per test; the throttle must never be the reason a test fails."""
+    from app.api.routes.auth import _login_attempts
+
+    _login_attempts.clear()
+    r = client.post("/api/auth/login", json={"username": "admin", "password": "test-password"})
+    assert r.status_code == 200, r.text
+    return r.json()["access_token"]
+
+
+@pytest.mark.parametrize("path", PRIVATE_ROUTES)
+def test_token_accepted_via_x_access_token_when_authorization_is_stripped(path, auth_token):
+    """A preview proxy that drops `Authorization` must not sign the operator out."""
+    r = client.get(path, headers={"X-Access-Token": auth_token})
+    assert r.status_code == 200, f"{path} -> {r.status_code} {r.text[:200]}"
+
+
+@pytest.mark.parametrize("path", PRIVATE_ROUTES)
+def test_token_still_accepted_via_authorization_header(path, auth_token):
+    r = client.get(path, headers={"Authorization": f"Bearer {auth_token}"})
+    assert r.status_code == 200, f"{path} -> {r.status_code} {r.text[:200]}"
+
+
+def test_x_access_token_rejects_garbage_and_revoked_tokens(auth_token):
+    assert client.get("/api/config", headers={"X-Access-Token": "not-a-jwt"}).status_code == 401
+
+    token = auth_token
+    assert client.get("/api/config", headers={"X-Access-Token": token}).status_code == 200
+    assert client.post("/api/auth/logout", headers={"X-Access-Token": token}).status_code == 200
+    assert client.get("/api/config", headers={"X-Access-Token": token}).status_code == 401
+
+
+def test_missing_token_reports_401_not_500():
+    r = client.get("/api/config")
+    assert r.status_code == 401
+    assert r.json()["detail"] == "Not authenticated"
+
+
+def test_diagnose_exposes_header_presence_without_leaking_the_token(auth_token):
+    token = auth_token
+
+    anon = client.get("/api/auth/diagnose").json()
+    assert anon["token_verifies"] is False
+    assert anon["failure_reason"] == "no_token_header_received"
+    assert anon["authorization_header_present"] is False
+
+    via_custom = client.get("/api/auth/diagnose", headers={"X-Access-Token": token}).json()
+    assert via_custom["token_verifies"] is True
+    assert via_custom["token_source"] == "x-access-token"
+    assert via_custom["authorization_header_present"] is False
+    assert via_custom["x_access_token_present"] is True
+
+    via_auth = client.get("/api/auth/diagnose", headers={"Authorization": f"Bearer {token}"}).json()
+    assert via_auth["token_verifies"] is True
+    assert via_auth["token_source"] == "authorization"
+
+    bad = client.get("/api/auth/diagnose", headers={"X-Access-Token": "garbage"}).json()
+    assert bad["token_verifies"] is False
+    assert bad["failure_reason"] == "signature_or_format_invalid"
+
+    # The token itself must never be echoed back.
+    for body in (anon, via_custom, via_auth, bad):
+        assert token not in str(body)
+
+
+def test_diagnose_reports_origin_allowlist_membership():
+    body = client.get("/api/auth/diagnose", headers={"Origin": "https://evil.example"}).json()
+    assert body["origin"] == "https://evil.example"
+    assert body["origin_allowed"] is False
+
+
+def test_successful_logins_do_not_consume_the_throttle_window():
+    """Repeated re-logins by the single operator must not lock them out."""
+    from app.api.routes.auth import _LOGIN_LIMIT, _login_attempts
+
+    _login_attempts.clear()
+    good = {"username": "admin", "password": "test-password"}
+    for _ in range(_LOGIN_LIMIT + 5):
+        assert client.post("/api/auth/login", json=good).status_code == 200
+    assert len(_login_attempts) == 0, "a success must clear the failed-attempt window"
+
+    # Failures still throttle, and still expire.
+    for _ in range(_LOGIN_LIMIT):
+        assert client.post("/api/auth/login", json={"username": "admin", "password": "wrong"}).status_code == 401
+    assert client.post("/api/auth/login", json=good).status_code == 429
+    _login_attempts.clear()
+    assert client.post("/api/auth/login", json=good).status_code == 200
