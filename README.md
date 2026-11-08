@@ -1,82 +1,56 @@
 # Super Signal 🎯
 
-AI-powered Binance USDT-M Futures trading bot with 6-agent ThreeRouter verification, deterministic risk engine, and real-time React dashboard.
+Super Signal is an **experimental prototype** of an AI-assisted Binance USDⓈ-M Futures trading system. The specifications and phased roadmap are in `PRD.md`, `architecture.md`, `rules.md`, `phases.md`, `design.md`, and `memory.md`.
 
-## Architecture
+## Safety and current status
 
-```
-Binance WebSocket → Symbol Universe → Trigger Engine (1.5%/180s) → AI Agents 1-5 (parallel) → Agent 6 YES/NO → Risk Gate → Execution → TP/SL Monitor → Cleaner
-```
+**Not ready for testnet order execution, live trading, or public deployment.** The real Binance adapter blocks all exposure-increasing orders, and the engine refuses to start with that adapter in both testnet and live modes. There is deliberately no configuration switch to unlock entries. The in-memory mock adapter is still available for development and tests; it is not a faithful exchange simulator.
 
-See `architecture.md`, `PRD.md`, `rules.md`, `phases.md`, `design.md`, `memory.md` for full specs.
+The adapter still permits requests marked reduce-only or close-position so existing exposure is not intentionally stranded by the entry lock. This is **not** a guarantee that protection, emergency closure, or exchange compatibility works: those paths remain unverified. Manage any real positions directly on the exchange.
 
-## Quick Start (Windows / Linux / macOS)
+Important outstanding blockers include:
 
-### Prerequisites
-- Python 3.11+
-- Node 18+
-- SQLite (local) / Aiven PostgreSQL (prod)
+- Real account mode, Portfolio Margin risk/headroom, conditional order contracts, and protective order behavior have not been verified.
+- Risk checks use placeholder P&L and drawdown values; hard limits and concurrency are not comprehensively enforced.
+- Ambiguous order submissions, fills, protection failures, restart/reconciliation, and emergency handling are not adequately safe or tested.
+- ThreeRouter's actual API contract and the required market-data feeds remain unverified; the current client contains assumptions, not a confirmed integration.
+- The default development login and JWT secret are insecure; authentication, secret management, auditability, and deployment need a security review. Never expose this prototype to an untrusted network or use real credentials.
+- Phase exit gates in `phases.md` are goals, not evidence of completion. No testnet or live exchange validation is claimed.
 
-### Backend
+## Local development
+
+Prerequisites: Python 3.11+, Node.js 18+. Run only locally, without real credentials.
+
+Backend (from the repository root):
 
 ```bash
-cd backend
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -e ..
-cp ../.env.example ../.env  # edit values
+# Windows: .venv\Scripts\activate
+# Linux/macOS: source .venv/bin/activate
+pip install -r backend/requirements.txt
+cd backend
 alembic upgrade head
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Health: http://localhost:8000/api/health
-Docs: http://localhost:8000/docs
-
-### Frontend
+Frontend (in another terminal):
 
 ```bash
 cd frontend
-npm install
-npm run dev
+npm ci
+npm run dev -- --host 127.0.0.1
 ```
 
-Dashboard: http://localhost:5173
-
-### Tests
+Backend tests (from the repository root):
 
 ```bash
-pytest backend/tests -v
-cd frontend && npm test
+# Windows PowerShell: $env:PYTHONPATH='backend'; pytest backend/tests
+# Linux/macOS:
+PYTHONPATH=backend pytest backend/tests
 ```
 
-## Key Features
+Tests use mocks and do not establish exchange compatibility or trading safety. See `docs/TESTING.md` and `docs/RESEARCH.md` for context, noting the verification warning in the latter.
 
-- **Market Scanner**: Full USDT-M perpetual universe, WebSocket last-price, 180s rolling trigger, deduplication & cooldown
-- **AI Pipeline**: ThreeRouter Agents 1-5 parallel + Agent 6 final YES/NO, fail-closed, schema-validated
-- **Risk Engine**: Decimal-based sizing, exchange filters, modeled loss ≤ allocated margin incl. fees/slippage, Portfolio Margin aware
-- **Execution**: Market entry, idempotent clientOrderId, fill reconciliation, TP/SL verification, emergency close, cleaner
-- **Dashboard**: Live scanner, positions, history, AI trace, config, engine controls, emergency stop
-- **Security**: JWT auth, Fernet credential encryption, redacted logs, no withdrawal, IP allowlist guidance
-- **Persistence**: SQLAlchemy + Alembic, SQLite local, Aiven PostgreSQL prod (TLS)
+## Risk disclosure
 
-## Environment Modes
-
-| Mode | Binance | DB | Purpose |
-|------|---------|----|---------|
-| development | Testnet | SQLite | Local dev |
-| testnet | Testnet | SQLite/PG | Integration tests |
-| production | Live | Aiven PG | Online trading |
-
-Never enable `APP_ENV=production` without setting hard risk limits (`DAILY_LOSS_LIMIT`, `MAX_DRAWDOWN_PCT`, `MAX_AGGREGATE_EXPOSURE`).
-
-## Emergency
-
-Dashboard → **Emergency Stop** immediately blocks new entries and applies configured flatten/protect policy. Requires confirmation + audit log.
-
-## Deployment
-
-See `deploy/README.md` — Aiven PostgreSQL + Aiven Runtime / VPS container. One trading worker initially. TLS + migrations required.
-
-## Disclaimer
-
-Modeled stop-loss is not a guarantee against gaps, liquidation, outages, or extreme slippage. Start with minimum allocation. See `rules.md` §4.2.
+The modeled stop loss is not a guarantee against gaps, slippage, liquidation, outages, or other extreme conditions. See `rules.md` §4.2.

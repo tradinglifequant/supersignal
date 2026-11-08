@@ -12,6 +12,8 @@ from app.core.config import get_settings
 from app.db.session import get_sync_session_factory
 from app.db.models import SignalCandidate, Trade
 from app.exchange.interface import ExchangeAdapter
+from app.exchange.binance_adapter import BinanceAdapter
+from sqlalchemy import text
 from app.market.symbol_universe import SymbolUniverseService
 from app.market.price_history import PriceHistory
 from app.market.websocket_manager import MarketDataWebSocketManager
@@ -185,6 +187,10 @@ class EngineService:
         return self.risk_engine.calculate_next_margin(self.settings.base_margin, last.realized_pnl)
 
     async def readiness_checks(self) -> tuple[bool, List[str]]:
+        # Do not start the real-exchange engine while order execution and its
+        # safety gates are unverified, even on testnet. Read-only APIs remain usable.
+        if isinstance(self.adapter, BinanceAdapter):
+            return False, ["Binance entries are locked pending safety verification (testnet and live)"]
         issues = []
         # Hard limits configured
         ok, missing = self.settings.check_hard_limits_configured()
@@ -206,7 +212,7 @@ class EngineService:
             issues.append(f"Credentials check error: {e}")
         # DB connectivity
         try:
-            self.db.execute("SELECT 1")  # type: ignore
+            self.db.execute(text("SELECT 1"))
         except Exception as e:
             issues.append(f"DB connectivity failed: {e}")
         # Unknown positions
