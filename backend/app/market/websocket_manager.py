@@ -54,6 +54,8 @@ class MarketDataWebSocketManager:
         self.ws_url_base = WS_BASE_TESTNET if settings.binance_testnet else WS_BASE_MAIN
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=10000)
         self.reconnect_attempts = 0
+        self.dropped_ticks = 0
+        self._last_drop_log_mono = 0.0
 
     def set_symbols(self, symbols: List[str]):
         self.symbols = [s.lower() for s in symbols]
@@ -69,8 +71,8 @@ class MarketDataWebSocketManager:
             if not self.symbols:
                 logger.warning("No symbols to subscribe in mock mode")
                 return
-            task = asyncio.create_task(self._run_mock_feed())
-            self.tasks.append(task)
+            self.tasks.append(asyncio.create_task(self._dispatch_loop()))
+            self.tasks.append(asyncio.create_task(self._run_mock_feed()))
             logger.info("Started mock market data feed for %d symbols", len(self.symbols))
             return
 
@@ -79,10 +81,32 @@ class MarketDataWebSocketManager:
         if not shards:
             logger.warning("No symbols to subscribe")
             return
+        # architecture.md: a dedicated consumer drains the bounded queue. Dispatching
+        # inline from the socket read loop let one slow candidate pipeline stall price
+        # ingestion for every symbol and could get the shard disconnected.
+        self.tasks.append(asyncio.create_task(self._dispatch_loop()))
         for idx, shard in enumerate(shards):
             task = asyncio.create_task(self._run_shard(idx, shard))
             self.tasks.append(task)
         logger.info("Started %d WS shards covering %d streams", len(shards), len(streams))
+
+    async def _dispatch_loop(self):
+        """Single consumer for the bounded tick queue; preserves per-feed ordering."""
+        while self.running:
+            try:
+                symbol, price, exchange_time = await asyncio.wait_for(self.queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+            if self.on_price is None:
+                continue
+            try:
+                res = self.on_price(symbol, price, exchange_time)
+                if asyncio.iscoroutine(res):
+                    await res
+            except Exception as e:
+                logger.error("on_price callback error: %s", e)
 
     async def stop(self):
         self.running = False
@@ -199,20 +223,23 @@ class MarketDataWebSocketManager:
 
         receipt_mono = time.monotonic()
         receipt_wall = datetime.now(timezone.utc)
+        # Price history is always updated, so a dropped dispatch never loses trigger data.
         self.history.add(symbol, price, exchange_time, receipt_mono, receipt_wall)
         try:
             self.queue.put_nowait((symbol, price, exchange_time))
         except asyncio.QueueFull:
-            logger.warning("Market data queue full, dropping oldest")
+            # Drop the OLDEST pending tick and keep the newest. Count the drops and log
+            # at most once a minute: on a saturated feed the previous per-tick warning
+            # flooded the log at thousands of lines per second.
             try:
                 self.queue.get_nowait()
                 self.queue.put_nowait((symbol, price, exchange_time))
             except Exception:
                 pass
-        if self.on_price:
-            try:
-                res = self.on_price(symbol, price, exchange_time)
-                if asyncio.iscoroutine(res):
-                    await res
-            except Exception as e:
-                logger.error("on_price callback error: %s", e)
+            self.dropped_ticks += 1
+            if receipt_mono - self._last_drop_log_mono >= 60.0:
+                self._last_drop_log_mono = receipt_mono
+                logger.warning(
+                    "Market data queue saturated; %d tick dispatch(es) dropped in the last interval",
+                    self.dropped_ticks,
+                )

@@ -9,6 +9,7 @@ The backend suite contains unit, integration, and mock tests for:
 - AI schema validation, symbol/direction mismatch rejection, timeout/malformed fail-closed behavior, and deterministic Agent 6 rejection when any mandatory Agent 1–5 fails or rejects (`test_ai_pipeline.py`, `test_audit_fixes.py`).
 - Authentication boundaries, JWT `jti` logout revocation, WebSocket first-message authentication/origin/expiry/revocation, secret redaction (including dict format arguments), encryption roundtrips, and Alembic upgrade/downgrade migrations (`test_auth_boundary.py`, `test_security.py`, `test_api.py`, `test_audit_fixes.py`).
 - Real-exchange entry lock enforcement (`test_exchange_entry_lock.py`).
+- Second-audit regressions: equity-curve windowing, net-of-fee win/loss consistency between `/api/metrics` and `/api/metrics/performance`, the single shared `ACTIVE_TRADE_STATUSES` definition across the positions API, engine status and metrics, market-feed queue saturation/drop accounting and ordered dispatch, per-iteration session isolation in the position monitor, stale `RUNNING` state reset on process restart, and working-directory-independent SQLite URL resolution (`test_audit_round2.py`).
 
 The frontend tests exercise WebSocket authentication/cleanup (`useWebSocket.test.tsx`) and unauthenticated login gating, form submission, and logout behavior (`App.test.tsx`).
 

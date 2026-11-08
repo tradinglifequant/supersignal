@@ -25,6 +25,17 @@ TRANSITIONS = {
     "ERROR": ["STOPPED", "STARTING"],
 }
 
+# States that assert a live trading worker. None of them can survive a process
+# restart: the scanner, market feed and position monitor are gone, so restoring
+# them would show RUNNING on the dashboard while nothing was actually running and
+# /api/engine/start would refuse to start ("already running").
+ACTIVE_STATES_ON_START = {"STARTING", "READY", "RUNNING", "STOPPING", "DEGRADED", "EMERGENCY"}
+
+# HALTED_RISK and ERROR are deliberately preserved: they need explicit operator
+# recovery per rules.md §7.
+RESTART_RESET_REASON = "Process restarted with no active trading worker; engine reset to STOPPED"
+
+
 class EngineStateMachine:
     def __init__(self, db: Session, settings: Settings):
         self.db = db
@@ -36,6 +47,19 @@ class EngineStateMachine:
         last = self.db.query(EngineStateRecord).order_by(EngineStateRecord.changed_at.desc()).first()
         if last:
             self._current = last.state
+            if self._current in ACTIVE_STATES_ON_START:
+                stale = self._current
+                self._current = "STOPPED"
+                self.db.add(
+                    EngineStateRecord(
+                        state="STOPPED",
+                        environment=self.settings.app_env,
+                        changed_at=datetime.now(timezone.utc),
+                        reason=RESTART_RESET_REASON,
+                    )
+                )
+                self.db.commit()
+                logger.warning("Persisted engine state %s is stale after restart; reset to STOPPED", stale)
         else:
             self._current = "STOPPED"
             rec = EngineStateRecord(state="STOPPED", environment=self.settings.app_env, changed_at=datetime.now(timezone.utc), reason="init")

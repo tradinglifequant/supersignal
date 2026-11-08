@@ -29,13 +29,19 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting %s %s env=%s", settings.app_name, settings.app_version, settings.app_env)
+    bootstrap_engine = None
     try:
-        engine = create_sync_engine()
-        Base.metadata.create_all(bind=engine)
-        ensure_schema_columns(engine)
+        bootstrap_engine = create_sync_engine()
+        Base.metadata.create_all(bind=bootstrap_engine)
+        ensure_schema_columns(bootstrap_engine)
         logger.info("DB tables ensured")
     except Exception as e:
         logger.error("DB init error: %s", e)
+    finally:
+        # The request/engine sessions use their own pooled engine; dispose this one
+        # so startup does not leak a second connection pool for the process lifetime.
+        if bootstrap_engine is not None:
+            bootstrap_engine.dispose()
     yield
     await shutdown_engine_singleton()
     logger.info("Shutting down")

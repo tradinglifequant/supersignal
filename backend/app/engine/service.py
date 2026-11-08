@@ -16,6 +16,8 @@ from app.api.websocket import broadcast_event
 from app.core.config import get_settings
 from app.core.logging import redact_str
 from app.db.models import (
+    ACTIVE_TRADE_STATUSES,
+    SETTLED_TRADE_STATUSES,
     AgentLog,
     AppConfig,
     EquitySnapshot,
@@ -24,6 +26,7 @@ from app.db.models import (
     SystemLog,
     Trade,
     ensure_utc,
+    net_realized_pnl,
 )
 from app.engine.state_machine import EngineStateMachine
 from app.exchange.binance_adapter import BinanceAdapter
@@ -100,6 +103,10 @@ class EngineService:
         self.candidate_mgr.db = session
         self.exec_engine.db = session
         self.cleaner.db = session
+        # The monitor keeps its own per-iteration sessions when a session factory
+        # is configured; only rebind it while it is sharing this service's session.
+        if self.position_monitor.session_factory is None:
+            self.position_monitor.rebind(session)
 
     def _active_cfg(self, db: Session):
         return db.query(AppConfig).first()
@@ -134,7 +141,7 @@ class EngineService:
     def _compute_global_risk_inputs(self, db: Session, ex_open_symbols: set[str]):
         closed_trades = (
             db.query(Trade)
-            .filter(Trade.status.in_(["CLOSED", "EMERGENCY_CLOSED"]))
+            .filter(Trade.status.in_(SETTLED_TRADE_STATUSES))
             .order_by(Trade.closed_at.desc())
             .all()
         )
@@ -143,15 +150,14 @@ class EngineService:
         for t in closed_trades:
             closed_dt = ensure_utc(t.closed_at)
             if closed_dt and closed_dt.date() == today and t.realized_pnl is not None:
-                net = t.realized_pnl - (t.fees or Decimal("0")) - (t.funding or Decimal("0"))
-                daily_realized_pnl += net
+                daily_realized_pnl += net_realized_pnl(t)
 
         # Consecutive losses from most recent closed trade backwards
         consecutive_losses = 0
         for t in closed_trades:
             if t.realized_pnl is None:
                 continue
-            net = t.realized_pnl - (t.fees or Decimal("0")) - (t.funding or Decimal("0"))
+            net = net_realized_pnl(t)
             if net <= Decimal("0"):
                 consecutive_losses += 1
             else:
@@ -166,7 +172,7 @@ class EngineService:
 
         local_open_symbols = {
             t.symbol
-            for t in db.query(Trade).filter(Trade.status.in_(["OPEN", "PROTECTED", "PENDING", "CLOSING"])).all()
+            for t in db.query(Trade).filter(Trade.status.in_(ACTIVE_TRADE_STATUSES)).all()
         }
         open_positions_count = len(local_open_symbols | ex_open_symbols)
         return daily_realized_pnl, drawdown_pct, consecutive_losses, open_positions_count
@@ -413,13 +419,13 @@ class EngineService:
         max_alloc = cfg.max_trade_allocation if cfg else self.settings.max_trade_allocation
         last = (
             self.db.query(Trade)
-            .filter(Trade.status.in_(["CLOSED", "EMERGENCY_CLOSED"]))
+            .filter(Trade.status.in_(SETTLED_TRADE_STATUSES))
             .order_by(Trade.closed_at.desc())
             .first()
         )
         if not last or last.realized_pnl is None:
             return base_margin
-        net_profit = last.realized_pnl - (last.fees or Decimal("0")) - (last.funding or Decimal("0"))
+        net_profit = net_realized_pnl(last)
         next_margin = self.risk_engine.calculate_next_margin(
             base_margin,
             net_profit,
@@ -476,7 +482,7 @@ class EngineService:
             unknown = [p.symbol for p in positions if p.position_amt != Decimal("0")]
             db_open = {
                 t.symbol
-                for t in self.db.query(Trade).filter(Trade.status.in_(["OPEN", "PROTECTED"])).all()
+                for t in self.db.query(Trade).filter(Trade.status.in_(ACTIVE_TRADE_STATUSES)).all()
             }
             for sym in unknown:
                 if sym not in db_open:
@@ -551,7 +557,7 @@ class EngineService:
         prev_state = self.state_machine.state
         self.state_machine.transition("EMERGENCY", reason=reason, force=True)
         await self.ws_manager.stop()
-        open_trades = self.db.query(Trade).filter(Trade.status.in_(["OPEN", "PROTECTED"])).all()
+        open_trades = self.db.query(Trade).filter(Trade.status.in_(ACTIVE_TRADE_STATUSES)).all()
         for t in open_trades:
             await self.exec_engine.emergency_close(t, reason="emergency_stop")
             await self.cleaner.cleanup_after_close(t)
@@ -569,7 +575,7 @@ class EngineService:
         logger.critical("Emergency stop completed: %s", reason)
 
     def get_status(self) -> dict:
-        open_positions = self.db.query(Trade).filter(Trade.status.in_(["OPEN", "PROTECTED"])).count()
+        open_positions = self.db.query(Trade).filter(Trade.status.in_(ACTIVE_TRADE_STATUSES)).count()
         unprotected = self.db.query(Trade).filter(Trade.status == "OPEN").count()
         cfg = self._active_cfg(self.db)
         daily_pnl, dd_pct, loss_streak, open_cnt = self._compute_global_risk_inputs(self.db, set())

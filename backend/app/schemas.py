@@ -214,6 +214,7 @@ class TradeResponse(BaseModel):
     modeled_max_loss: Optional[str] = None
     realized_pnl: Optional[str] = None
     fees: Optional[str] = None
+    funding: Optional[str] = None
     status: str
     close_reason: Optional[str] = None
     created_at: datetime

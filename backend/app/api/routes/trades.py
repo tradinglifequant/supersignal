@@ -5,7 +5,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.db.models import AgentLog, AuditEvent, Order, SystemLog, Trade
+from app.db.models import ACTIVE_TRADE_STATUSES, AgentLog, AuditEvent, Order, SystemLog, Trade
 from app.db.session import get_db
 from app.schemas import AgentLogResponse, OrderResponse, SystemLogResponse, TradeResponse
 from app.security.auth import get_current_user
@@ -20,7 +20,7 @@ async def list_positions(
     user=Depends(get_current_user),
 ):
     if status == "OPEN":
-        q = db.query(Trade).filter(Trade.status.in_(["OPEN", "PROTECTED", "PENDING"])).order_by(Trade.created_at.desc())
+        q = db.query(Trade).filter(Trade.status.in_(ACTIVE_TRADE_STATUSES)).order_by(Trade.created_at.desc())
     elif status:
         q = db.query(Trade).filter(Trade.status == status).order_by(Trade.created_at.desc())
     else:
@@ -168,6 +168,7 @@ def _to_trade_resp(t: Trade) -> TradeResponse:
         modeled_max_loss=str(t.modeled_max_loss) if t.modeled_max_loss is not None else None,
         realized_pnl=str(t.realized_pnl) if t.realized_pnl is not None else None,
         fees=str(t.fees) if t.fees is not None else None,
+        funding=str(t.funding) if t.funding is not None else None,
         status=t.status,
         close_reason=t.close_reason,
         created_at=t.created_at,

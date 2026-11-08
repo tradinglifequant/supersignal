@@ -29,10 +29,14 @@ pip install --upgrade pip setuptools wheel
 pip install -r backend/requirements.txt
 # Copy .env.example to .env (or backend/.env), then configure ADMIN_USERNAME,
 # ADMIN_PASSWORD_HASH, and a unique JWT_SECRET_KEY (see below).
-cd backend
-alembic upgrade head
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+alembic -c backend/alembic.ini upgrade head
+PYTHONPATH=backend uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
+
+Relative `sqlite:///` URLs in `DATABASE_URL` are anchored to the repository root, and
+`backend/alembic.ini` resolves its script directory from its own location, so migrations
+and the API server use the same database whether you start them from the repository root
+or from `backend/`.
 
 ### Configure the local operator
 

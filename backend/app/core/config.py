@@ -80,6 +80,25 @@ class Settings(BaseSettings):
     # Frontend
     cors_origins: str = Field(default="http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000")
 
+    @field_validator("database_url", mode="after")
+    @classmethod
+    def _resolve_sqlite_path(cls, v: str) -> str:
+        """Anchor relative SQLite files to the repository root.
+
+        A bare ``sqlite:///./data/supersignal.db`` resolves against the process
+        working directory, so ``alembic upgrade head`` run from ``backend/`` and
+        ``uvicorn`` started from the repository root silently used two different
+        databases. Absolute URLs (including PostgreSQL) are returned unchanged.
+        """
+        for prefix in ("sqlite+aiosqlite:///", "sqlite:///"):
+            if not v.startswith(prefix):
+                continue
+            path = v[len(prefix):]
+            if not path or ":memory:" in path or path.startswith("/"):
+                return v
+            return f"{prefix}{(_REPO_ROOT / path).resolve().as_posix()}"
+        return v
+
     @field_validator(
         "trigger_percentage",
         "base_margin",

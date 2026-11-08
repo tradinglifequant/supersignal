@@ -9,7 +9,7 @@ export const Positions: React.FC = () => {
   const load = useCallback(async () => {
     const [o, allTrades] = await Promise.all([
       api.get('/api/positions?status=OPEN').catch(() => ({ data: [] })),
-      api.get('/api/trades?limit=50').catch(() => ({ data: [] })),
+      api.get('/api/trades?limit=200').catch(() => ({ data: [] })),
     ])
     setOpen(o.data)
     setClosed(

@@ -87,6 +87,7 @@ export interface Trade {
   modeled_max_loss?: string
   realized_pnl?: string
   fees?: string
+  funding?: string
   status: string
   close_reason?: string
   created_at: string

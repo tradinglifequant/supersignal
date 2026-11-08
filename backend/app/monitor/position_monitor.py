@@ -9,7 +9,15 @@ import uuid
 
 from sqlalchemy.orm import Session
 
-from app.db.models import AppConfig, EquitySnapshot, MarginScalingEvent, Trade, ensure_utc
+from app.db.models import (
+    ACTIVE_TRADE_STATUSES,
+    AppConfig,
+    EquitySnapshot,
+    MarginScalingEvent,
+    Trade,
+    ensure_utc,
+    net_realized_pnl,
+)
 from app.exchange.interface import ExchangeAdapter
 from app.execution.execution_engine import ExecutionEngine
 from app.monitor.cleaner import OrderCleaner
@@ -41,6 +49,12 @@ class PositionMonitor:
         self.running = False
         self.task: asyncio.Task | None = None
 
+    def rebind(self, session: Session) -> None:
+        """Point the monitor and its helpers at a shared session (no session factory)."""
+        self.db = session
+        self.exec_engine.db = session
+        self.cleaner.db = session
+
     async def start(self):
         if self.running:
             return
@@ -64,11 +78,19 @@ class PositionMonitor:
             session: Session | None = None
             try:
                 if self.session_factory is not None:
+                    # Use helpers that are private to this iteration. Rebinding the
+                    # shared EngineService ExecutionEngine here let a concurrent
+                    # price tick swap self.exec_engine.db underneath an in-flight
+                    # reconciliation, so protection-repair commits could be written
+                    # to a session that did not own the loaded Trade objects.
                     session = self.session_factory()
-                    self.db = session
-                    self.exec_engine.db = session
-                    self.cleaner.db = session
-                await self.reconcile_all()
+                    exec_engine = ExecutionEngine(
+                        self.adapter, self.exec_engine.risk, session, self.exec_engine.settings
+                    )
+                    cleaner = OrderCleaner(self.adapter, session)
+                    await self.reconcile_all(db=session, exec_engine=exec_engine, cleaner=cleaner)
+                else:
+                    await self.reconcile_all()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -78,7 +100,8 @@ class PositionMonitor:
                     session.close()
             await asyncio.sleep(self.poll_interval)
 
-    async def capture_equity_snapshot(self):
+    async def capture_equity_snapshot(self, db: Session | None = None):
+        db = db if db is not None else self.db
         try:
             balances = await self.adapter.get_balances()
             usdt = next((b for b in balances if b.asset == "USDT"), None)
@@ -92,33 +115,35 @@ class PositionMonitor:
                     unrealized_pnl=usdt.cross_unrealized,
                     captured_at=datetime.now(timezone.utc),
                 )
-                self.db.add(snap)
-                self.db.commit()
+                db.add(snap)
+                db.commit()
         except Exception as e:
             logger.debug("Equity snapshot skipped: %s", e)
 
-    def _record_margin_scaling_if_needed(self, trade: Trade):
+    def _record_margin_scaling_if_needed(self, trade: Trade, db: Session | None = None, exec_engine=None):
+        db = db if db is not None else self.db
+        exec_engine = exec_engine if exec_engine is not None else self.exec_engine
         if trade.realized_pnl is None:
             return
         existing = (
-            self.db.query(MarginScalingEvent)
+            db.query(MarginScalingEvent)
             .filter(MarginScalingEvent.closed_trade_id == trade.id)
             .first()
         )
         if existing:
             return
-        cfg = self.db.query(AppConfig).first()
-        base_margin = cfg.base_margin if cfg else self.exec_engine.settings.base_margin
-        reinvest_pct = cfg.profit_reinvestment_pct if cfg else self.exec_engine.settings.profit_reinvestment_pct
-        max_alloc = cfg.max_trade_allocation if cfg else self.exec_engine.settings.max_trade_allocation
-        net_profit = trade.realized_pnl - (trade.fees or Decimal("0")) - (trade.funding or Decimal("0"))
-        next_margin = self.exec_engine.risk.calculate_next_margin(
+        cfg = db.query(AppConfig).first()
+        base_margin = cfg.base_margin if cfg else exec_engine.settings.base_margin
+        reinvest_pct = cfg.profit_reinvestment_pct if cfg else exec_engine.settings.profit_reinvestment_pct
+        max_alloc = cfg.max_trade_allocation if cfg else exec_engine.settings.max_trade_allocation
+        net_profit = net_realized_pnl(trade)
+        next_margin = exec_engine.risk.calculate_next_margin(
             base_margin,
             net_profit,
             reinvest_pct=reinvest_pct,
             max_allocation=max_alloc,
         )
-        self.db.add(
+        db.add(
             MarginScalingEvent(
                 id=str(uuid.uuid4()),
                 closed_trade_id=trade.id,
@@ -129,15 +154,20 @@ class PositionMonitor:
                 created_at=datetime.now(timezone.utc),
             )
         )
-        self.db.commit()
+        db.commit()
 
-    async def reconcile_all(self):
-        await self.capture_equity_snapshot()
-        open_trades = (
-            self.db.query(Trade)
-            .filter(Trade.status.in_(["OPEN", "PROTECTED", "PENDING", "CLOSING"]))
-            .all()
-        )
+    async def reconcile_all(
+        self,
+        db: Session | None = None,
+        exec_engine: ExecutionEngine | None = None,
+        cleaner: OrderCleaner | None = None,
+    ):
+        db = db if db is not None else self.db
+        exec_engine = exec_engine if exec_engine is not None else self.exec_engine
+        cleaner = cleaner if cleaner is not None else self.cleaner
+
+        await self.capture_equity_snapshot(db=db)
+        open_trades = db.query(Trade).filter(Trade.status.in_(ACTIVE_TRADE_STATUSES)).all()
         if not open_trades:
             return
 
@@ -156,30 +186,32 @@ class PositionMonitor:
                     trade.status = "CLOSED"
                     trade.close_reason = trade.close_reason or "detected_close"
                     trade.closed_at = datetime.now(timezone.utc)
-                    self.db.commit()
-                    await self.cleaner.cleanup_after_close(trade)
-                    self._record_margin_scaling_if_needed(trade)
+                    db.commit()
+                    await cleaner.cleanup_after_close(trade)
+                    self._record_margin_scaling_if_needed(trade, db=db, exec_engine=exec_engine)
                 continue
 
-            protected = await self.exec_engine.verify_protection(trade)
+            protected = await exec_engine.verify_protection(trade)
             if not protected and trade.status == "PROTECTED":
                 logger.warning("Protection unhealthy for %s, attempting repair", trade.id)
-                await self.exec_engine.handle_protection_failure(trade)
+                await exec_engine.handle_protection_failure(trade)
 
-        self.db.commit()
-        await self._check_unprotected_timeout()
+        db.commit()
+        await self._check_unprotected_timeout(db=db, exec_engine=exec_engine)
 
-    async def _check_unprotected_timeout(self):
-        cfg = self.db.query(AppConfig).first()
-        deadline_secs = cfg.protection_deadline_seconds if cfg else self.exec_engine.settings.protection_deadline_seconds
+    async def _check_unprotected_timeout(self, db: Session | None = None, exec_engine=None):
+        db = db if db is not None else self.db
+        exec_engine = exec_engine if exec_engine is not None else self.exec_engine
+        cfg = db.query(AppConfig).first()
+        deadline_secs = cfg.protection_deadline_seconds if cfg else exec_engine.settings.protection_deadline_seconds
         max_unprotected = max(deadline_secs, 10)
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_unprotected)
-        open_unprotected = self.db.query(Trade).filter(Trade.status == "OPEN").all()
+        open_unprotected = db.query(Trade).filter(Trade.status == "OPEN").all()
         for t in open_unprotected:
             created = ensure_utc(t.created_at)
             if created and created < cutoff:
                 logger.critical("Unprotected position %s exceeds timeout (%ds); invoking emergency policy", t.id, max_unprotected)
-                await self.exec_engine.handle_protection_failure(t)
+                await exec_engine.handle_protection_failure(t)
 
     async def get_protection_status(self, trade: Trade) -> str:
         try:
