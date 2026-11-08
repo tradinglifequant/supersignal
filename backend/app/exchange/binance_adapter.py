@@ -50,7 +50,7 @@ def _decimal(v: Any) -> Decimal:
 
 
 class EntryLockedError(RuntimeError):
-    """New Binance exposure is disabled pending safety and integration verification."""
+    """The trading gate refused a new exposure-increasing order."""
 
 
 class BinanceAdapter(ExchangeAdapter):
@@ -59,18 +59,57 @@ class BinanceAdapter(ExchangeAdapter):
     New exposure-increasing orders remain locked until full exchange & safety verification passes.
     """
 
-    def __init__(self, api_key: str | None = None, api_secret: str | None = None, testnet: bool | None = None):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        api_secret: str | None = None,
+        testnet: bool | None = None,
+        portfolio_margin: bool | None = None,
+        gate: Any | None = None,
+    ):
         settings = get_settings()
         self.api_key = api_key if api_key is not None else settings.binance_api_key
         self.api_secret = api_secret if api_secret is not None else settings.binance_api_secret
         self.testnet = testnet if testnet is not None else settings.binance_testnet
+        # Portfolio Margin is declared by the operator, never inferred from a 404.
+        # On a PM account USD-M futures orders live under /papi/v1/um/*; sending
+        # them to /fapi/v1/order is a different, wrong account surface.
+        self.portfolio_margin = (
+            portfolio_margin if portfolio_margin is not None else settings.portfolio_margin
+        )
         self.base_url = settings.binance_testnet_base_url if self.testnet else settings.binance_base_url
         self.recv_window = settings.binance_recv_window
+        # When None, every exposure-increasing order is refused. Wiring the gate
+        # in is what arms trading; the adapter never self-authorizes.
+        self.gate = gate
         self.client = httpx.AsyncClient(
             timeout=10.0,
             headers={"X-MBX-APIKEY": self.api_key} if self.api_key else {},
         )
-        logger.info("BinanceAdapter initialized testnet=%s base=%s", self.testnet, self.base_url)
+        logger.info(
+            "BinanceAdapter initialized testnet=%s portfolio_margin=%s base=%s",
+            self.testnet,
+            self.portfolio_margin,
+            self.base_url,
+        )
+
+    # --- path routing -------------------------------------------------
+    @property
+    def _order_path(self) -> str:
+        """PM accounts place USD-M futures orders on the portfolio-margin router."""
+        return "/papi/v1/um/order" if self.portfolio_margin else "/fapi/v1/order"
+
+    @property
+    def _open_orders_path(self) -> str:
+        return "/papi/v1/um/openOrders" if self.portfolio_margin else "/fapi/v1/openOrders"
+
+    @property
+    def _all_open_orders_path(self) -> str:
+        return "/papi/v1/um/allOpenOrders" if self.portfolio_margin else "/fapi/v1/allOpenOrders"
+
+    @property
+    def _position_risk_path(self) -> str:
+        return "/papi/v1/um/positionRisk" if self.portfolio_margin else "/fapi/v2/positionRisk"
 
     def _sign(self, params: dict) -> dict:
         if not self.api_secret:
@@ -166,7 +205,9 @@ class BinanceAdapter(ExchangeAdapter):
         return result
 
     async def get_account_info(self) -> dict:
-        for path in ["/papi/v1/account", "/fapi/v2/account"]:
+        primary = "/papi/v1/account" if self.portfolio_margin else "/fapi/v2/account"
+        fallback = "/fapi/v2/account" if self.portfolio_margin else "/papi/v1/account"
+        for path in [primary, fallback]:
             try:
                 return await self._request("GET", path, signed=True)
             except BinanceAPIError as e:
@@ -177,7 +218,9 @@ class BinanceAdapter(ExchangeAdapter):
 
     async def get_balances(self) -> List[BalanceDTO]:
         data = None
-        for path in ["/papi/v1/balance", "/fapi/v2/balance"]:
+        primary = "/papi/v1/balance" if self.portfolio_margin else "/fapi/v2/balance"
+        fallback = "/fapi/v2/balance" if self.portfolio_margin else "/papi/v1/balance"
+        for path in [primary, fallback]:
             try:
                 data = await self._request("GET", path, signed=True)
                 break
@@ -199,12 +242,13 @@ class BinanceAdapter(ExchangeAdapter):
 
     async def get_positions(self) -> List[PositionDTO]:
         data = None
-        for path in ["/papi/v1/positionRisk", "/fapi/v2/positionRisk"]:
+        for path in [self._position_risk_path]:
             try:
                 data = await self._request("GET", path, signed=True)
                 break
             except BinanceAPIError as e:
                 if e.status_code in (404, 400):
+                    logger.warning("Position risk unavailable at %s (HTTP %s)", path, e.status_code)
                     continue
                 raise
         if data is None:
@@ -230,7 +274,7 @@ class BinanceAdapter(ExchangeAdapter):
         params = {}
         if symbol:
             params["symbol"] = symbol
-        data = await self._request("GET", "/fapi/v1/openOrders", params=params, signed=True)
+        data = await self._request("GET", self._open_orders_path, params=params, signed=True)
         return [self._to_order_dto(o) for o in data]
 
     async def create_order(
@@ -247,11 +291,22 @@ class BinanceAdapter(ExchangeAdapter):
         position_side: Optional[str] = None,
         working_type: Optional[str] = None,
     ) -> OrderResultDTO:
-        # No configuration flag can unlock entries before the unfinished safety gates
-        # are implemented and reviewed. Preserve reduce-only/close-position requests
-        # for existing exposure; their exchange support remains unverified.
         if not reduce_only and not close_position:
-            raise EntryLockedError("Binance entries are locked pending safety verification")
+            # Exposure-increasing orders go through the trading gate. Reduce-only
+            # and close-position orders bypass it: refusing to close a position
+            # would strand real margin unprotected.
+            if self.gate is None:
+                raise EntryLockedError(
+                    "no trading gate configured; entries are disabled"
+                )
+            notional = await self._estimate_notional(symbol, quantity, price)
+            decision = await self.gate.authorize_entry(symbol, notional, price=price)
+            if not decision.allowed:
+                logger.warning(
+                    "Entry refused for %s: %s", symbol, decision.reason
+                )
+                raise EntryLockedError(decision.reason)
+            logger.info("Entry authorized for %s: %s", symbol, decision.reason)
         params: dict[str, Any] = {
             "symbol": symbol,
             "side": side.upper(),
@@ -274,7 +329,7 @@ class BinanceAdapter(ExchangeAdapter):
         if working_type:
             params["workingType"] = working_type
 
-        data = await self._request("POST", "/fapi/v1/order", params=params, signed=True)
+        data = await self._request("POST", self._order_path, params=params, signed=True)
         return self._to_order_dto(data)
 
     async def query_order(
@@ -285,7 +340,7 @@ class BinanceAdapter(ExchangeAdapter):
             params["orderId"] = str(order_id)
         if client_order_id:
             params["origClientOrderId"] = client_order_id
-        data = await self._request("GET", "/fapi/v1/order", params=params, signed=True)
+        data = await self._request("GET", self._order_path, params=params, signed=True)
         return self._to_order_dto(data)
 
     async def cancel_order(
@@ -296,11 +351,150 @@ class BinanceAdapter(ExchangeAdapter):
             params["orderId"] = str(order_id)
         if client_order_id:
             params["origClientOrderId"] = client_order_id
-        data = await self._request("DELETE", "/fapi/v1/order", params=params, signed=True)
+        data = await self._request("DELETE", self._order_path, params=params, signed=True)
         return self._to_order_dto(data)
 
     async def cancel_all_orders(self, symbol: str) -> dict:
-        return await self._request("DELETE", "/fapi/v1/allOpenOrders", params={"symbol": symbol}, signed=True)
+        return await self._request(
+            "DELETE", self._all_open_orders_path, params={"symbol": symbol}, signed=True
+        )
+
+    # ------------------------------------------------------------------
+    # Market-context feeds (public endpoints; identical for PM and non-PM).
+    # Each returns None on failure so a degraded feed degrades the snapshot
+    # instead of aborting the candidate.
+    # ------------------------------------------------------------------
+
+    async def get_klines(self, symbol: str, interval: str = "1m", limit: int = 60) -> list[dict] | None:
+        try:
+            raw = await self._request(
+                "GET",
+                "/fapi/v1/klines",
+                params={"symbol": symbol, "interval": interval, "limit": min(limit, 500)},
+            )
+        except Exception as e:
+            logger.debug("klines %s failed: %s", symbol, type(e).__name__)
+            return None
+        out: list[dict] = []
+        for k in raw or []:
+            try:
+                out.append(
+                    {
+                        "open_time": k[0],
+                        "open": str(k[1]),
+                        "high": str(k[2]),
+                        "low": str(k[3]),
+                        "close": str(k[4]),
+                        "volume": str(k[5]),
+                        "close_time": k[6],
+                        "quote_volume": str(k[7]),
+                        "trades": k[8],
+                    }
+                )
+            except (IndexError, TypeError, ValueError):
+                continue
+        return out or None
+
+    async def get_depth(self, symbol: str, limit: int = 20) -> dict | None:
+        try:
+            raw = await self._request(
+                "GET", "/fapi/v1/depth", params={"symbol": symbol, "limit": min(limit, 100)}
+            )
+        except Exception as e:
+            logger.debug("depth %s failed: %s", symbol, type(e).__name__)
+            return None
+        bids = raw.get("bids") or []
+        asks = raw.get("asks") or []
+        if not bids or not asks:
+            return None
+        return {
+            "last_update_id": raw.get("lastUpdateId"),
+            "top_bids": [{"price": str(p), "qty": str(q)} for p, q in bids[:10]],
+            "top_asks": [{"price": str(p), "qty": str(q)} for p, q in asks[:10]],
+            "bid_ask_spread": str(_decimal(asks[0][0]) - _decimal(bids[0][0])),
+        }
+
+    async def get_funding_rate(self, symbol: str) -> dict | None:
+        try:
+            raw = await self._request("GET", "/fapi/v1/premiumIndex", params={"symbol": symbol})
+        except Exception as e:
+            logger.debug("premiumIndex %s failed: %s", symbol, type(e).__name__)
+            return None
+        if not isinstance(raw, dict) or not raw:
+            return None
+        return {
+            "mark_price": str(raw.get("markPrice", "0")),
+            "index_price": str(raw.get("indexPrice", "0")),
+            "last_funding_rate": str(raw.get("lastFundingRate", "0")),
+            "next_funding_time": raw.get("nextFundingTime"),
+        }
+
+    async def get_open_interest(self, symbol: str) -> dict | None:
+        try:
+            raw = await self._request("GET", "/fapi/v1/openInterest", params={"symbol": symbol})
+        except Exception as e:
+            logger.debug("openInterest %s failed: %s", symbol, type(e).__name__)
+            return None
+        if not isinstance(raw, dict) or not raw.get("openInterest"):
+            return None
+        return {"open_interest": str(raw["openInterest"]), "symbol": raw.get("symbol", symbol)}
+
+    async def get_ticker_24h(self, symbol: str) -> dict | None:
+        try:
+            raw = await self._request("GET", "/fapi/v1/ticker/24hr", params={"symbol": symbol})
+        except Exception as e:
+            logger.debug("ticker/24hr %s failed: %s", symbol, type(e).__name__)
+            return None
+        if not isinstance(raw, dict) or not raw:
+            return None
+        return {
+            "volume": str(raw.get("volume", "0")),
+            "quote_volume": str(raw.get("quoteVolume", "0")),
+            "price_change_pct": str(raw.get("priceChangePercent", "0")),
+            "high": str(raw.get("highPrice", "0")),
+            "low": str(raw.get("lowPrice", "0")),
+        }
+
+    async def get_server_time(self) -> int | None:
+        try:
+            raw = await self._request("GET", "/fapi/v1/time")
+        except Exception:
+            return None
+        if isinstance(raw, dict) and raw.get("serverTime") is not None:
+            return int(raw["serverTime"])
+        return None
+
+    async def get_api_key_permissions(self) -> dict | None:
+        """
+        Read what the key may do. ``can_withdraw`` is the one that matters: a
+        trading key that can move funds out must never be handed to this process.
+        Read from both account surfaces and treated as true if either says so.
+        """
+        result: dict = {"can_trade": None, "can_withdraw": None, "can_deposit": None, "source": None}
+        for path in ("/fapi/v2/account", "/papi/v1/account"):
+            try:
+                acct = await self._request("GET", path, signed=True)
+            except Exception:
+                continue
+            if not isinstance(acct, dict):
+                continue
+            result["source"] = path
+            if acct.get("canTrade") is not None:
+                result["can_trade"] = bool(acct["canTrade"])
+            if acct.get("canWithdraw") is not None:
+                # Fail towards the strictest reading: any true wins.
+                result["can_withdraw"] = bool(
+                    result["can_withdraw"] or bool(acct["canWithdraw"])
+                )
+            if acct.get("canDeposit") is not None:
+                result["can_deposit"] = bool(acct["canDeposit"])
+            if self.portfolio_margin:
+                result["uni_mmr_setting"] = acct.get("uniMMRSetting")
+                result["equity"] = str(acct.get("equity")) if acct.get("equity") is not None else None
+            break
+        if result["source"] is None:
+            return None
+        return result
 
     async def validate_credentials(self) -> tuple[bool, str, dict | None]:
         if not self.api_key or not self.api_secret:
@@ -315,6 +509,28 @@ class BinanceAdapter(ExchangeAdapter):
             return False, f"Validation failed (HTTP {e.status_code})", None
         except Exception:
             return False, "Validation error", None
+
+    async def _estimate_notional(
+        self, symbol: str, quantity: Decimal, price: Optional[Decimal]
+    ) -> Decimal:
+        """
+        Quote-currency value of an entry. For market orders the limit price is
+        absent, so the mark price is used; if that is unavailable the notional is
+        unknown and a deliberately huge value is returned so the ceiling check
+        rejects rather than silently passing an unbounded order.
+        """
+        px = price
+        if px is None or px <= 0:
+            feed = await self.get_funding_rate(symbol)
+            mark = (feed or {}).get("mark_price")
+            try:
+                px = _decimal(mark) if mark else None
+            except Exception:
+                px = None
+        if px is None or px <= 0:
+            logger.warning("Cannot estimate notional for %s; treating as unbounded", symbol)
+            return _decimal("999999999999")
+        return abs(_decimal(quantity)) * px
 
     def _to_order_dto(self, data: dict) -> OrderResultDTO:
         return OrderResultDTO(

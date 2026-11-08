@@ -242,6 +242,95 @@ class MockBinanceAdapter(ExchangeAdapter):
                 o.status = "CANCELED"
         return {"msg": "canceled"}
 
+    # --- deterministic market-context feeds --------------------------------
+    # Deterministic (seeded off the symbol) so tests are reproducible while the
+    # snapshot/context path is exercised for real instead of being all-missing.
+
+    _FEED_PRICES = {
+        "BTCUSDT": Decimal("65000"),
+        "ETHUSDT": Decimal("2500"),
+        "SOLUSDT": Decimal("150"),
+        "BNBUSDT": Decimal("600"),
+    }
+
+    def _px(self, symbol: str) -> Decimal:
+        return self._FEED_PRICES.get(symbol, Decimal("100"))
+
+    async def get_klines(self, symbol: str, interval: str = "1m", limit: int = 60) -> list[dict] | None:
+        px = self._px(symbol)
+        out = []
+        for i in range(min(limit, 60)):
+            # Slow deterministic ramp so the structure (and drift) is realistic.
+            c = px * (Decimal("1") + Decimal(i) / Decimal("600"))
+            o = c * Decimal("0.999")
+            out.append(
+                {
+                    "open_time": 1_700_000_000_000 + i * 60_000,
+                    "open": str(o),
+                    "high": str(c * Decimal("1.001")),
+                    "low": str(o * Decimal("0.999")),
+                    "close": str(c),
+                    "volume": str(Decimal("10") + i),
+                    "close_time": 1_700_000_000_000 + (i + 1) * 60_000,
+                    "quote_volume": str((Decimal("10") + i) * c),
+                    "trades": 50 + i,
+                }
+            )
+        return out
+
+    async def get_depth(self, symbol: str, limit: int = 20) -> dict | None:
+        px = self._px(symbol)
+        tick = px * Decimal("0.0001")
+        # A perfectly symmetric book gives a bid share of exactly 0.500, which no
+        # imbalance rule can ever pass. Skew it deterministically per symbol so the
+        # order-flow rule is actually exercised.
+        skew = {"BTCUSDT": Decimal("1.35"), "ETHUSDT": Decimal("1.30"),
+                "SOLUSDT": Decimal("0.90"), "BNBUSDT": Decimal("1.05")}.get(symbol, Decimal("1.0"))
+        bids = [{"price": str(px - tick * (i + 1)), "qty": str((Decimal("1") + i) * skew)} for i in range(10)]
+        asks = [{"price": str(px + tick * (i + 1)), "qty": str(Decimal("1") + i)} for i in range(10)]
+        return {
+            "last_update_id": 1,
+            "top_bids": bids,
+            "top_asks": asks,
+            "bid_ask_spread": str(tick * 2),
+        }
+
+    async def get_funding_rate(self, symbol: str) -> dict | None:
+        px = self._px(symbol)
+        return {
+            "mark_price": str(px),
+            "index_price": str(px * Decimal("0.9999")),
+            "last_funding_rate": "0.0001",
+            "next_funding_time": 1_700_003_600_000,
+        }
+
+    async def get_open_interest(self, symbol: str) -> dict | None:
+        return {"open_interest": "123456.789", "symbol": symbol}
+
+    async def get_ticker_24h(self, symbol: str) -> dict | None:
+        px = self._px(symbol)
+        return {
+            "volume": "1000000",
+            "quote_volume": str(px * Decimal("1000000")),
+            "price_change_pct": "1.23",
+            "high": str(px * Decimal("1.02")),
+            "low": str(px * Decimal("0.98")),
+        }
+
+    async def get_server_time(self) -> int | None:
+        import time
+
+        return int(time.time() * 1000)
+
+    async def get_api_key_permissions(self) -> dict | None:
+        # A mock key is never withdrawal-capable, so the preflight passes in dev.
+        return {
+            "can_trade": True,
+            "can_withdraw": False,
+            "can_deposit": True,
+            "source": "mock",
+        }
+
     async def get_account_info(self):
         return {"canTrade": True, "feeTier": 0, "totalWalletBalance": "1000", "availableBalance": "900"}
 

@@ -121,6 +121,21 @@ export interface EngineStatus {
   symbol_coverage: number
   open_positions: number
   unprotected_positions: number
+  // Execution-gate visibility: why the engine is or is not placing orders.
+  trading_env?: string
+  ai_gate_mode?: string
+  portfolio_margin?: boolean
+  live_armed?: boolean
+}
+
+export interface PreflightReport {
+  passed: boolean
+  blocking: string[]
+  trading_env: string
+  live_armed: boolean
+  kill_switch: boolean
+  ai_gate_mode: string
+  checks: Record<string, unknown>
 }
 
 export interface AgentLog {

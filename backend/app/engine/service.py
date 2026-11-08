@@ -38,6 +38,7 @@ from app.market.context_builder import build_market_snapshot
 from app.market.price_history import PriceHistory
 from app.market.symbol_universe import SymbolUniverseService
 from app.market.trigger_engine import TriggerEngine
+from app.trading.gate import TradingGate
 from app.market.websocket_manager import MarketDataWebSocketManager
 from app.monitor.cleaner import OrderCleaner
 from app.monitor.position_monitor import PositionMonitor
@@ -90,6 +91,15 @@ class EngineService:
         self.running_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         self._tick_lock = asyncio.Lock()
+
+        # The adapter is expected to arrive with a gate attached (see
+        # app.exchange.factory). If it does not - e.g. an adapter built directly
+        # in a test - attach one so behaviour is identical rather than silently
+        # refusing every entry with a confusing message.
+        if getattr(adapter, "gate", None) is None and hasattr(adapter, "gate"):
+            is_testnet = getattr(adapter, "testnet", isinstance(adapter, MockBinanceAdapter))
+            adapter.gate = TradingGate(adapter, self.settings, is_testnet=is_testnet)
+        self.gate: TradingGate | None = getattr(adapter, "gate", None)
 
     @property
     def db(self) -> Session:
@@ -236,7 +246,9 @@ class EngineService:
         )
 
         self.candidate_mgr.mark_processing(cand)
-        snapshot = await build_market_snapshot(cand, self.price_history, self.adapter, self.settings)
+        snapshot = await build_market_snapshot(
+            cand, self.price_history, self.adapter, self.settings, db=self.db
+        )
         cand.snapshot_json = json.dumps(snapshot.model_dump(mode="json"), default=str)
         self.db.commit()
 
@@ -600,4 +612,8 @@ class EngineService:
             "symbol_coverage": len(self.ws_manager.symbols),
             "binance_connected": bool(self.ws_manager.connected),
             "risk_blocks": blocks,
+            "trading_env": self.settings.trading_env,
+            "ai_gate_mode": self.settings.ai_gate_mode,
+            "portfolio_margin": self.settings.portfolio_margin,
+            "live_armed": self.settings.live_armed,
         }

@@ -101,6 +101,21 @@ class EngineStatusResponse(BaseModel):
     symbol_coverage: int = 0
     open_positions: int = 0
     unprotected_positions: int = 0
+    # Execution-gate visibility: the operator must be able to see why nothing trades.
+    trading_env: str = "none"
+    ai_gate_mode: str = "threerouter"
+    portfolio_margin: bool = False
+    live_armed: bool = False
+
+
+class PreflightResponse(BaseModel):
+    passed: bool
+    blocking: list[str] = Field(default_factory=list)
+    trading_env: str
+    live_armed: bool
+    kill_switch: bool
+    ai_gate_mode: str
+    checks: dict = Field(default_factory=dict)
 
 
 class EngineActionRequest(BaseModel):

@@ -1,6 +1,6 @@
 # Security status
 
-This prototype is **not approved for public deployment or real credentials**. Binance entry is locked for both testnet and live; protective/reducing order paths are not verified against a live or testnet exchange account.
+This prototype is **not approved for public deployment or real credentials**. Binance entry is gated by an evaluated trading gate that defaults to `TRADING_ENV=none` (no order can be placed); protective/reducing order paths are not verified against a live or testnet exchange account. See `LIVE_TRADING.md` for the staged path and for what remains unverified.
 
 ## Authentication baseline
 
@@ -9,6 +9,20 @@ All application data and control HTTP routes require a bearer token, including i
 The bearer token is accepted from `Authorization: Bearer <token>` or from an `X-Access-Token` header. Some reverse proxies and sandbox preview tunnels forward custom headers but drop or rewrite `Authorization`, which previously signed the operator straight back out; both headers carry the same token and go through identical signature, subject, expiry and `jti`-revocation checks. The frontend sends both. Rejection reasons (`token_expired`, `signature_or_format_invalid`, `subject_mismatch`, `token_revoked`, `no_token_header_received`) are logged server-side with no token content and returned in aggregate by `/api/auth/diagnose`, so a proxy dropping the header is distinguishable from a bad password.
 
 Login is limited to 10 **failed** attempts per 60 seconds per process, across all clients; a successful login clears the window. Counting successes too locked the single operator out for a minute after a few re-logins. Both login throttling and `jti` revocation are bounded in-memory safeguards for a single-process local prototype: they reset on process restart and do not coordinate across multiple workers. Deployment requires an independently reviewed shared rate limiter, TLS, a secure trusted proxy setup, and persistent distributed session revocation.
+
+## Execution gate
+
+Exposure-increasing orders pass through `app/trading/gate.py`. Live real money
+requires four independent things to agree, so no single stray environment
+variable can arm it: `TRADING_ENV=live`, `LIVE_TRADING_OPT_IN=true`,
+`LIVE_TRADING_ACKNOWLEDGEMENT` matching the exact required phrase, and
+`KILL_SWITCH` unset. Beyond that the gate verifies against the exchange itself
+that the key can trade, **cannot withdraw**, that local clock drift is within
+tolerance, that every hard risk limit is configured, and that the required
+testnet soak has elapsed. Reduce-only and close-position orders bypass the gate
+by design — being unable to close a position is strictly worse than being unable
+to open one. `GET /api/engine/preflight` reports every check and names what is
+blocking, without echoing credentials.
 
 ## Credential & logging protections
 
