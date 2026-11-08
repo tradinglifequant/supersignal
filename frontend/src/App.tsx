@@ -1,0 +1,108 @@
+import React, { useEffect, useState } from 'react'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import api from './services/api'
+import { TopBar } from './components/layout/TopBar'
+import { Sidebar } from './components/layout/Sidebar'
+import { EngineControls } from './components/common/EngineControls'
+import { Overview } from './pages/Overview'
+import { LiveScanner } from './pages/LiveScanner'
+import { Positions } from './pages/Positions'
+import { History } from './pages/History'
+import { AIAnalysis } from './pages/AIAnalysis'
+import { Configuration } from './pages/Configuration'
+import { SystemLogs } from './pages/SystemLogs'
+import { useWebSocket } from './hooks/useWebSocket'
+import { HealthResponse, EngineStatus } from './types'
+
+export default function App() {
+  const [health, setHealth] = useState<HealthResponse | null>(null)
+  const [engine, setEngine] = useState<EngineStatus | null>(null)
+  const [events, setEvents] = useState<any[]>([])
+
+  const refresh = async () => {
+    try {
+      const [h, e] = await Promise.all([api.get('/api/health'), api.get('/api/engine/status')])
+      setHealth(h.data)
+      setEngine(e.data)
+    } catch {}
+  }
+
+  useEffect(() => {
+    refresh()
+    const iv = setInterval(refresh, 5000)
+    return () => clearInterval(iv)
+  }, [])
+
+  const { connected } = useWebSocket((ev) => {
+    setEvents((prev) => [ev, ...prev].slice(0, 20))
+  })
+
+  const [token, setToken] = useState<string | null>(localStorage.getItem('supersignal_token'))
+  const [loginForm, setLoginForm] = useState({ username: 'admin', password: 'admin123' })
+  const [loginError, setLoginError] = useState('')
+
+  const handleLogin = async () => {
+    try {
+      const r = await api.post('/api/auth/login', loginForm)
+      localStorage.setItem('supersignal_token', r.data.access_token)
+      setToken(r.data.access_token)
+      setLoginError('')
+    } catch (e: any) {
+      setLoginError('Login failed: ' + (e.response?.data?.detail || e.message))
+    }
+  }
+  const handleLogout = () => {
+    localStorage.removeItem('supersignal_token')
+    setToken(null)
+  }
+
+  if (!token) {
+    return (
+      <div style={{ minHeight: '100vh', background: '#0f172a', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ background: '#1e293b', padding: 24, borderRadius: 12, border: '1px solid #334155', width: 360 }}>
+          <h2 style={{ color: '#e2e8f0', marginTop: 0 }}>Sign in to Super Signal 🎯</h2>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <input value={loginForm.username} onChange={(e) => setLoginForm({ ...loginForm, username: e.target.value })} placeholder="Username" style={{ padding: '10px 12px', borderRadius: 6, border: '1px solid #334155', background: '#0f172a', color: '#e2e8f0' }} />
+            <input type="password" value={loginForm.password} onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })} placeholder="Password" style={{ padding: '10px 12px', borderRadius: 6, border: '1px solid #334155', background: '#0f172a', color: '#e2e8f0' }} />
+            {loginError && <div style={{ color: '#ef4444', fontSize: 12 }}>{loginError}</div>}
+            <button onClick={handleLogin} style={{ padding: '10px 16px', borderRadius: 6, background: '#38bdf8', border: 'none', color: '#0f172a', fontWeight: 700, cursor: 'pointer' }}>Sign In</button>
+            <div style={{ fontSize: 11, color: '#64748b' }}>Default dev credentials: admin / admin123. Change via ADMIN_PASSWORD_HASH env.</div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <BrowserRouter>
+      <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: '#0f172a' }}>
+        <TopBar health={health || undefined} engine={engine} wsConnected={connected} />
+        <div style={{ display: 'flex', flex: 1 }}>
+          <Sidebar />
+          <div style={{ flex: 1, overflow: 'auto' }}>
+            <div style={{ padding: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <EngineControls state={engine?.state || 'STOPPED'} onUpdate={refresh} />
+              <button onClick={handleLogout} style={{ padding: '6px 12px', borderRadius: 6, background: '#1e293b', border: '1px solid #334155', color: '#e2e8f0', cursor: 'pointer', fontSize: 12 }}>Sign Out</button>
+            </div>
+            <Routes>
+              <Route path="/" element={<Overview engine={engine} />} />
+              <Route path="/scanner" element={<LiveScanner />} />
+              <Route path="/positions" element={<Positions />} />
+              <Route path="/history" element={<History />} />
+              <Route path="/ai" element={<AIAnalysis />} />
+              <Route path="/config" element={<Configuration />} />
+              <Route path="/system" element={<SystemLogs />} />
+              <Route path="*" element={<Navigate to="/" />} />
+            </Routes>
+          </div>
+        </div>
+        <div style={{ position: 'fixed', bottom: 10, right: 10, background: '#1e293b', border: '1px solid #334155', borderRadius: 8, padding: 10, fontSize: 11, color: '#94a3b8', maxWidth: 300, display: events.length ? 'block' : 'none' }}>
+          <div style={{ fontWeight: 700, color: '#e2e8f0', marginBottom: 6 }}>Live Events (WS)</div>
+          {events.slice(0, 5).map((e, i) => (
+            <div key={i} style={{ borderBottom: '1px solid #1e293b', padding: '4px 0' }}>{e.type}: {JSON.stringify(e.payload)?.slice(0, 80)}</div>
+          ))}
+        </div>
+      </div>
+    </BrowserRouter>
+  )
+}
